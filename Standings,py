@@ -1,0 +1,878 @@
+
+from __future__ import annotations
+
+import threading
+from datetime import datetime
+from typing import Any
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+MAX_LEAGUES = 5000
+MAX_TEAMS_PER_LEAGUE = 500
+
+
+# ============================================================
+# STATE
+# ============================================================
+
+LOCK = threading.RLock()
+
+_leagues: dict[str, dict[str, Any]] = {}
+
+
+# ============================================================
+# SPORT CATALOGUE
+# ============================================================
+
+SUPPORTED_SPORTS = {
+    "football",
+    "soccer",
+    "basketball",
+    "american football",
+    "baseball",
+    "ice hockey",
+    "cricket",
+    "rugby",
+    "rugby league",
+    "rugby union",
+    "volleyball",
+    "handball",
+    "futsal",
+    "netball",
+    "lacrosse",
+    "field hockey",
+    "water polo",
+    "motorsport",
+    "tennis",
+    "golf",
+    "esports",
+}
+
+
+# ============================================================
+# KNOWN COMPETITIONS
+# ============================================================
+
+# This is deliberately a catalogue rather than the actual
+# live standings. Add competition IDs from your sports-data
+# provider here.
+
+COMPETITIONS = {
+
+    # --------------------------------------------------------
+    # FOOTBALL / SOCCER
+    # --------------------------------------------------------
+
+    "football": {
+
+        "england": [
+            "Premier League",
+            "Championship",
+            "League One",
+            "League Two",
+            "National League",
+            "National League North",
+            "National League South",
+        ],
+
+        "spain": [
+            "La Liga",
+            "Segunda División",
+            "Primera Federación",
+            "Segunda Federación",
+        ],
+
+        "germany": [
+            "Bundesliga",
+            "2. Bundesliga",
+            "3. Liga",
+        ],
+
+        "italy": [
+            "Serie A",
+            "Serie B",
+            "Serie C",
+        ],
+
+        "france": [
+            "Ligue 1",
+            "Ligue 2",
+            "National",
+        ],
+
+        "portugal": [
+            "Primeira Liga",
+            "Liga Portugal 2",
+        ],
+
+        "netherlands": [
+            "Eredivisie",
+            "Eerste Divisie",
+        ],
+
+        "belgium": [
+            "Belgian Pro League",
+            "Challenger Pro League",
+        ],
+
+        "scotland": [
+            "Scottish Premiership",
+            "Scottish Championship",
+            "Scottish League One",
+            "Scottish League Two",
+        ],
+
+        "turkey": [
+            "Süper Lig",
+            "1. Lig",
+        ],
+
+        "greece": [
+            "Super League Greece",
+            "Super League 2",
+        ],
+
+        "usa": [
+            "MLS",
+            "USL Championship",
+            "USL League One",
+        ],
+
+        "mexico": [
+            "Liga MX",
+            "Liga de Expansión MX",
+        ],
+
+        "brazil": [
+            "Brasileirão Série A",
+            "Brasileirão Série B",
+            "Brasileirão Série C",
+            "Brasileirão Série D",
+        ],
+
+        "argentina": [
+            "Liga Profesional",
+            "Primera Nacional",
+        ],
+
+        "japan": [
+            "J1 League",
+            "J2 League",
+            "J3 League",
+        ],
+
+        "south korea": [
+            "K League 1",
+            "K League 2",
+        ],
+
+        "australia": [
+            "A-League Men",
+            "A-League Women",
+        ],
+
+        "saudi arabia": [
+            "Saudi Pro League",
+            "Saudi First Division",
+        ],
+
+        "uae": [
+            "UAE Pro League",
+        ],
+
+        "qatar": [
+            "Qatar Stars League",
+        ],
+
+        "india": [
+            "Indian Super League",
+            "I-League",
+        ],
+
+        "china": [
+            "Chinese Super League",
+            "China League One",
+        ],
+
+        "south africa": [
+            "South African Premiership",
+            "Motsepe Foundation Championship",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # BASKETBALL
+    # --------------------------------------------------------
+
+    "basketball": {
+
+        "usa": [
+            "NBA",
+            "WNBA",
+            "NBA G League",
+        ],
+
+        "europe": [
+            "EuroLeague",
+            "EuroCup",
+        ],
+
+        "spain": [
+            "Liga ACB",
+        ],
+
+        "italy": [
+            "Lega Basket Serie A",
+        ],
+
+        "germany": [
+            "Basketball Bundesliga",
+        ],
+
+        "france": [
+            "LNB Pro A",
+        ],
+
+        "turkey": [
+            "Basketbol Süper Ligi",
+        ],
+
+        "australia": [
+            "NBL",
+            "WNBL",
+        ],
+
+        "china": [
+            "CBA",
+        ],
+
+        "japan": [
+            "B.League",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # AMERICAN FOOTBALL
+    # --------------------------------------------------------
+
+    "american football": {
+
+        "usa": [
+            "NFL",
+            "UFL",
+            "NCAA Division I FBS",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # BASEBALL
+    # --------------------------------------------------------
+
+    "baseball": {
+
+        "usa": [
+            "MLB",
+            "Minor League Baseball",
+        ],
+
+        "japan": [
+            "NPB",
+        ],
+
+        "south korea": [
+            "KBO League",
+        ],
+
+        "taiwan": [
+            "Chinese Professional Baseball League",
+        ],
+
+        "mexico": [
+            "Mexican League",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # ICE HOCKEY
+    # --------------------------------------------------------
+
+    "ice hockey": {
+
+        "usa": [
+            "NHL",
+        ],
+
+        "canada": [
+            "NHL",
+        ],
+
+        "europe": [
+            "Champions Hockey League",
+        ],
+
+        "sweden": [
+            "SHL",
+        ],
+
+        "finland": [
+            "Liiga",
+        ],
+
+        "germany": [
+            "DEL",
+        ],
+
+        "switzerland": [
+            "National League",
+        ],
+
+        "czech republic": [
+            "Czech Extraliga",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # CRICKET
+    # --------------------------------------------------------
+
+    "cricket": {
+
+        "international": [
+            "Test Championship",
+            "ODI World Cup",
+            "T20 World Cup",
+        ],
+
+        "india": [
+            "Indian Premier League",
+            "Ranji Trophy",
+        ],
+
+        "australia": [
+            "Big Bash League",
+            "Sheffield Shield",
+        ],
+
+        "england": [
+            "County Championship",
+            "T20 Blast",
+        ],
+
+        "pakistan": [
+            "Pakistan Super League",
+        ],
+
+        "bangladesh": [
+            "Bangladesh Premier League",
+        ],
+
+        "south africa": [
+            "SA20",
+        ],
+
+        "new zealand": [
+            "Super Smash",
+        ],
+
+        "west indies": [
+            "Caribbean Premier League",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # RUGBY
+    # --------------------------------------------------------
+
+    "rugby": {
+
+        "england": [
+            "Premiership Rugby",
+            "RFU Championship",
+        ],
+
+        "france": [
+            "Top 14",
+            "Pro D2",
+        ],
+
+        "new zealand": [
+            "Super Rugby Pacific",
+        ],
+
+        "australia": [
+            "Super Rugby Pacific",
+        ],
+
+        "international": [
+            "Six Nations",
+            "Rugby Championship",
+            "Rugby World Cup",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # VOLLEYBALL
+    # --------------------------------------------------------
+
+    "volleyball": {
+
+        "international": [
+            "Volleyball Nations League",
+            "FIVB World Championship",
+        ],
+
+        "italy": [
+            "SuperLega",
+        ],
+
+        "poland": [
+            "PlusLiga",
+        ],
+
+        "brazil": [
+            "Superliga",
+        ],
+    },
+
+
+    # --------------------------------------------------------
+    # HANDBALL
+    # --------------------------------------------------------
+
+    "handball": {
+
+        "international": [
+            "IHF World Championship",
+            "EHF Champions League",
+        ],
+
+        "germany": [
+            "Handball-Bundesliga",
+        ],
+
+        "france": [
+            "LNH Division 1",
+        ],
+    },
+}
+
+
+# ============================================================
+# NORMALISATION
+# ============================================================
+
+def normalise(
+    value: str
+) -> str:
+
+    return " ".join(
+        value.strip().lower().split()
+    )
+
+
+# ============================================================
+# CREATE / REGISTER LEAGUE
+# ============================================================
+
+def register_league(
+    name: str,
+    sport: str,
+    country: str = "",
+    competition_id: str | None = None
+) -> bool:
+
+    if not name or not sport:
+        return False
+
+    sport_key = normalise(sport)
+
+    key = normalise(
+        f"{sport}:{country}:{name}"
+    )
+
+    with LOCK:
+
+        if (
+            key not in _leagues
+            and len(_leagues) >= MAX_LEAGUES
+        ):
+            return False
+
+        _leagues[key] = {
+            "name": name,
+            "sport": sport,
+            "country": country,
+            "competition_id": competition_id,
+            "season": None,
+            "updated": None,
+            "teams": []
+        }
+
+    return True
+
+
+# ============================================================
+# UPDATE STANDINGS
+# ============================================================
+
+def update_standings(
+    name: str,
+    sport: str,
+    country: str,
+    teams: list[dict[str, Any]],
+    season: str | None = None,
+    updated: str | None = None
+) -> bool:
+
+    key = normalise(
+        f"{sport}:{country}:{name}"
+    )
+
+    if len(teams) > MAX_TEAMS_PER_LEAGUE:
+        return False
+
+    cleaned = []
+
+    for team in teams:
+
+        if not isinstance(
+            team,
+            dict
+        ):
+            continue
+
+        try:
+
+            played = int(
+                team.get(
+                    "played",
+                    0
+                )
+            )
+
+            wins = int(
+                team.get(
+                    "wins",
+                    0
+                )
+            )
+
+            draws = int(
+                team.get(
+                    "draws",
+                    0
+                )
+            )
+
+            losses = int(
+                team.get(
+                    "losses",
+                    0
+                )
+            )
+
+            scored = int(
+                team.get(
+                    "goals_for",
+                    team.get(
+                        "points_for",
+                        0
+                    )
+                )
+            )
+
+            conceded = int(
+                team.get(
+                    "goals_against",
+                    team.get(
+                        "points_against",
+                        0
+                    )
+                )
+            )
+
+            points = int(
+                team.get(
+                    "points",
+                    0
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+            continue
+
+        team_name = str(
+            team.get(
+                "team",
+                ""
+            )
+        ).strip()
+
+        if not team_name:
+            continue
+
+        cleaned.append({
+            "team": team_name,
+            "played": played,
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "for": scored,
+            "against": conceded,
+            "difference":
+                scored - conceded,
+            "points": points
+        })
+
+    # Standard league ordering.
+    cleaned.sort(
+        key=lambda team: (
+            team["points"],
+            team["difference"],
+            team["for"]
+        ),
+        reverse=True
+    )
+
+    with LOCK:
+
+        if key not in _leagues:
+            register_league(
+                name,
+                sport,
+                country
+            )
+
+        _leagues[key]["teams"] = cleaned
+        _leagues[key]["season"] = season
+        _leagues[key]["updated"] = (
+            updated
+            or datetime.utcnow().isoformat()
+        )
+
+    return True
+
+
+# ============================================================
+# GET STANDINGS
+# ============================================================
+
+def get_standings(
+    name: str,
+    sport: str,
+    country: str = ""
+) -> list[dict[str, Any]]:
+
+    key = normalise(
+        f"{sport}:{country}:{name}"
+    )
+
+    with LOCK:
+
+        league = _leagues.get(
+            key
+        )
+
+        if not league:
+            return []
+
+        return [
+            {
+                "position": index,
+                **team
+            }
+            for index, team
+            in enumerate(
+                league["teams"],
+                start=1
+            )
+        ]
+
+
+# ============================================================
+# FORMAT TABLE
+# ============================================================
+
+def format_table(
+    name: str,
+    sport: str,
+    country: str = ""
+) -> str:
+
+    key = normalise(
+        f"{sport}:{country}:{name}"
+    )
+
+    with LOCK:
+
+        league = _leagues.get(
+            key
+        )
+
+    if not league:
+        return (
+            f"No standings data is loaded "
+            f"for {name}."
+        )
+
+    table = get_standings(
+        name,
+        sport,
+        country
+    )
+
+    if not table:
+        return (
+            f"{name} currently has "
+            "no standings data."
+        )
+
+    lines = [
+        f"{league['name']}",
+        f"Sport: {league['sport']}",
+        f"Country: {league['country'] or 'International'}",
+        f"Season: {league['season'] or 'Unknown'}",
+        "",
+        "Pos  Team                    P   W   D   L   Diff  Pts",
+        "-" * 65
+    ]
+
+    for team in table:
+
+        lines.append(
+            f"{team['position']:>3}  "
+            f"{team['team'][:23]:<23} "
+            f"{team['played']:>2}  "
+            f"{team['wins']:>2}  "
+            f"{team['draws']:>2}  "
+            f"{team['losses']:>2}  "
+            f"{team['difference']:>5}  "
+            f"{team['points']:>3}"
+        )
+
+    if league["updated"]:
+
+        lines.extend([
+            "",
+            f"Updated: {league['updated']}"
+        ])
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
+# SEARCH COMPETITIONS
+# ============================================================
+
+def search_competitions(
+    query: str
+) -> list[dict[str, str]]:
+
+    query = normalise(
+        query
+    )
+
+    results = []
+
+    for sport, countries in COMPETITIONS.items():
+
+        for country, leagues in countries.items():
+
+            for league in leagues:
+
+                searchable = normalise(
+                    f"{league} {country} {sport}"
+                )
+
+                if query in searchable:
+
+                    results.append({
+                        "league": league,
+                        "country": country,
+                        "sport": sport
+                    })
+
+    return results
+
+
+# ============================================================
+# LIST ALL SUPPORTED COMPETITIONS
+# ============================================================
+
+def all_competitions() -> list[dict[str, str]]:
+
+    results = []
+
+    for sport, countries in COMPETITIONS.items():
+
+        for country, leagues in countries.items():
+
+            for league in leagues:
+
+                results.append({
+                    "league": league,
+                    "country": country,
+                    "sport": sport
+                })
+
+    return results
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+def status() -> dict:
+
+    return {
+        "enabled": True,
+        "registered_leagues":
+            len(_leagues),
+        "catalogued_competitions":
+            len(all_competitions()),
+        "supported_sports":
+            len(SUPPORTED_SPORTS)
+    }
+
+
+# ============================================================
+# TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    print(
+        "Nexora Universal Standings"
+    )
+
+    print(
+        "-" * 40
+    )
+
+    print(
+        status()
+    )
+
+    print()
+
+    results = search_competitions(
+        "premier league"
+    )
+
+    for result in results:
+        print(result)
