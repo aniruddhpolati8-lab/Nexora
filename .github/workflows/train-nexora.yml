@@ -1,2 +1,37 @@
+
 name: Nexora Training Test
-on: workflow_dispatch: jobs: test: runs-on: ubuntu-latest steps: - uses: actions/checkout@v4 - uses: actions/setup-python@v5 with: python-version: "3.11" - name: Install dependencies run: pip install torch sentencepiece - name: Check Python files run: | python -m py_compile nexora_model.py python -m py_compile tokenizer.py python -m py_compile train.py - name: Test Nexora run: python nexora_model.py
+
+on:
+workflow_dispatch:
+
+jobs:
+test: runs-on: ubuntu-latest
+
+steps:
+- name: Checkout
+uses: actions/checkout@v4
+
+name: Setup Python
+uses: actions/setup-python@v5
+with:
+python-version: "3.11"
+
+name: Install dependencies
+run: |
+python -m pip install --upgrade pip
+python -m pip install torch sentencepiece
+
+name: Check Python syntax
+run: |
+python -m py_compile nexora_model
+python -m py_compile tokenizer.py
+python -m py_compile train.py
+
+name: Test Nexora
+run: python nexora_model.py
+
+
+
+
+
+
