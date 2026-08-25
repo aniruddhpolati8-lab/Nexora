@@ -1,514 +1,1115 @@
+import ast
 import json
 import os
+import random
+import re
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
-
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8000"))
 
+# ============================================================
+# NEXORA
+# ============================================================
 
-HTML = r"""<!DOCTYPE html>
+NAME = "Nexora"
+SLOGAN = "Intelligence. Secured."
+
+# ============================================================
+# CONVERSATION MEMORY
+# ============================================================
+
+MAX_MEMORY = 30
+memory = []
+
+
+def remember(role, text):
+    memory.append({
+        "role": role,
+        "text": text
+    })
+
+    if len(memory) > MAX_MEMORY:
+        del memory[0]
+
+
+def recent_memory():
+    return memory[-MAX_MEMORY:]
+
+
+# ============================================================
+# KNOWLEDGE BASE
+# ============================================================
+
+KNOWLEDGE = {
+    "name": "Nexora",
+    "slogan": SLOGAN,
+    "description": (
+        "Nexora is a coded AI assistant designed to be "
+        "helpful, useful and safety-conscious."
+    ),
+    "version": "2.0",
+    "creator": "Nexora's creator",
+}
+
+
+# ============================================================
+# SAFETY SYSTEM
+# ============================================================
+
+BLOCKED_PATTERNS = [
+    r"\bhow to make a bomb\b",
+    r"\bhow to make an explosive\b",
+    r"\bhow to poison someone\b",
+    r"\bhow to hurt someone\b",
+]
+
+
+def safety_check(text):
+    lowered = text.lower()
+
+    for pattern in BLOCKED_PATTERNS:
+        if re.search(pattern, lowered):
+            return False
+
+    return True
+
+
+# ============================================================
+# INTENT SYSTEM
+# ============================================================
+
+def detect_intent(text):
+    t = text.lower().strip()
+
+    if not t:
+        return "empty"
+
+    if any(x in t for x in [
+        "hello",
+        "hi",
+        "hey",
+        "hiya",
+        "good morning",
+        "good afternoon",
+        "good evening"
+    ]):
+        return "greeting"
+
+    if any(x in t for x in [
+        "bye",
+        "goodbye",
+        "see you",
+        "see ya"
+    ]):
+        return "goodbye"
+
+    if any(x in t for x in [
+        "who are you",
+        "what are you",
+        "what is nexora"
+    ]):
+        return "identity"
+
+    if any(x in t for x in [
+        "what can you do",
+        "help me",
+        "help",
+        "capabilities"
+    ]):
+        return "help"
+
+    if any(x in t for x in [
+        "what time",
+        "current time",
+        "time is it"
+    ]):
+        return "time"
+
+    if any(x in t for x in [
+        "what date",
+        "today's date",
+        "what day"
+    ]):
+        return "date"
+
+    if t.startswith("calculate "):
+        return "calculate"
+
+    if t.startswith("calc "):
+        return "calculate"
+
+    if t.startswith("remember "):
+        return "remember"
+
+    if t in ["forget", "forget everything", "clear memory"]:
+        return "forget"
+
+    if "?" in t:
+        return "question"
+
+    question_words = (
+        "what ",
+        "why ",
+        "when ",
+        "where ",
+        "who ",
+        "how ",
+        "can ",
+        "could ",
+        "would ",
+        "is ",
+        "are ",
+        "do ",
+        "does "
+    )
+
+    if t.startswith(question_words):
+        return "question"
+
+    return "conversation"
+
+
+# ============================================================
+# KNOWLEDGE SYSTEM
+# ============================================================
+
+def knowledge_lookup(text):
+    t = text.lower()
+
+    if "your name" in t:
+        return f"My name is {NAME}."
+
+    if "slogan" in t:
+        return f"My slogan is: {SLOGAN}"
+
+    if "version" in t:
+        return f"I'm running Nexora version {KNOWLEDGE['version']}."
+
+    if "who created you" in t or "who made you" in t:
+        return f"I was created by {KNOWLEDGE['creator']}."
+
+    if "what is nexora" in t:
+        return KNOWLEDGE["description"]
+
+    return None
+
+
+# ============================================================
+# SAFE CALCULATOR
+# ============================================================
+
+ALLOWED_OPERATORS = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+    ast.Mod: lambda a, b: a % b,
+    ast.Pow: lambda a, b: a ** b,
+}
+
+
+def safe_calculate(expression):
+    expression = expression.strip()
+
+    if len(expression) > 100:
+        return None
+
+    try:
+        tree = ast.parse(
+            expression,
+            mode="eval"
+        )
+
+        def evaluate(node):
+
+            if isinstance(node, ast.Expression):
+                return evaluate(node.body)
+
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, (int, float)):
+                    return node.value
+                raise ValueError()
+
+            if isinstance(node, ast.BinOp):
+                operator = ALLOWED_OPERATORS.get(
+                    type(node.op)
+                )
+
+                if operator is None:
+                    raise ValueError()
+
+                left = evaluate(node.left)
+                right = evaluate(node.right)
+
+                return operator(left, right)
+
+            if isinstance(node, ast.UnaryOp):
+                value = evaluate(node.operand)
+
+                if isinstance(node.op, ast.USub):
+                    return -value
+
+                if isinstance(node.op, ast.UAdd):
+                    return value
+
+            raise ValueError()
+
+        result = evaluate(tree)
+
+        if isinstance(result, float):
+            return round(result, 10)
+
+        return result
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# RESPONSE GENERATOR
+# ============================================================
+
+def generate_response(message, intent):
+
+    text = message.strip()
+
+    # Knowledge comes first
+    answer = knowledge_lookup(text)
+
+    if answer:
+        return answer
+
+    # Greeting
+    if intent == "greeting":
+
+        return random.choice([
+            "Hello! Nexora is online. What can I help you with?",
+            "Hey! I'm Nexora. What are we working on today?",
+            "Hello! I'm ready when you are.",
+            "Hi! What would you like to explore?"
+        ])
+
+    # Goodbye
+    if intent == "goodbye":
+
+        return random.choice([
+            "Goodbye! I'll be here when you return.",
+            "See you later!",
+            "Take care!",
+            "Nexora signing off."
+        ])
+
+    # Identity
+    if intent == "identity":
+
+        return (
+            "I'm Nexora — a coded AI assistant. "
+            "My current brain uses memory, intent detection, "
+            "knowledge, tools, response generation and safety checks."
+        )
+
+    # Help
+    if intent == "help":
+
+        return (
+            "I can remember our current conversation, "
+            "recognise different types of requests, "
+            "answer questions from my knowledge base, "
+            "perform calculations and handle several commands."
+        )
+
+    # Time
+    if intent == "time":
+
+        now = datetime.now()
+
+        return (
+            "The current server time is "
+            + now.strftime("%H:%M:%S")
+            + "."
+        )
+
+    # Date
+    if intent == "date":
+
+        now = datetime.now()
+
+        return (
+            "Today's date is "
+            + now.strftime("%A, %d %B %Y")
+            + "."
+        )
+
+    # Calculator
+    if intent == "calculate":
+
+        expression = re.sub(
+            r"^(calculate|calc)\s+",
+            "",
+            text,
+            flags=re.IGNORECASE
+        )
+
+        result = safe_calculate(expression)
+
+        if result is None:
+            return (
+                "I couldn't safely calculate that. "
+                "Try something like: calculate 25 * 4"
+            )
+
+        return f"The answer is {result}."
+
+    # Remember
+    if intent == "remember":
+
+        information = re.sub(
+            r"^remember\s+",
+            "",
+            text,
+            flags=re.IGNORECASE
+        ).strip()
+
+        if not information:
+            return "Tell me what you'd like me to remember."
+
+        remember(
+            "memory",
+            information
+        )
+
+        return (
+            "I'll keep that in the current conversation."
+        )
+
+    # Forget
+    if intent == "forget":
+
+        memory.clear()
+
+        return (
+            "Current conversation memory cleared."
+        )
+
+    # Question
+    if intent == "question":
+
+        return random.choice([
+            "That's a good question. I don't have enough information in my current knowledge base to answer it yet.",
+            "I understand the question, but my current knowledge system doesn't contain that information yet.",
+            "I'd need more knowledge to give you a reliable answer to that.",
+        ])
+
+    # General conversation
+    return random.choice([
+        "Interesting. Tell me more.",
+        "I'm following you. What should we look at next?",
+        "Got it. What would you like to do with that?",
+        "I understand. Keep going.",
+        "That makes sense.",
+    ])
+
+
+# ============================================================
+# AI MODEL CONNECTOR
+# ============================================================
+
+def ai_model(message, history):
+
+    """
+    This is the future model connection point.
+
+    For now, Nexora's coded brain handles the response.
+
+    Later, a real pretrained language model can replace
+    this function without rebuilding the whole website.
+    """
+
+    intent = detect_intent(message)
+
+    return generate_response(
+        message,
+        intent
+    )
+
+
+# ============================================================
+# NEXORA BRAIN
+# ============================================================
+
+def process_message(message):
+
+    message = message.strip()
+
+    if not message:
+        return "Please type a message."
+
+    # Input safety
+    if not safety_check(message):
+
+        return (
+            "I can't help with dangerous instructions. "
+            "Let's try something safer."
+        )
+
+    # Remember user message
+    remember(
+        "user",
+        message
+    )
+
+    # Generate response
+    response = ai_model(
+        message,
+        recent_memory()
+    )
+
+    # Output safety
+    if not safety_check(response):
+
+        response = (
+            "I can't provide that response."
+        )
+
+    # Remember Nexora response
+    remember(
+        "nexora",
+        response
+    )
+
+    return response
+
+
+# ============================================================
+# WEB INTERFACE
+# ============================================================
+
+HTML = r"""
+<!DOCTYPE html>
+
 <html lang="en">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nexora — Intelligence. Secured.</title>
 
-    <style>
-        @import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap");
+<meta charset="UTF-8">
 
-        :root {
-            --background: #080512;
-            --panel: rgba(22, 12, 39, 0.86);
-            --panel-light: rgba(42, 20, 69, 0.8);
-            --purple: #a100ff;
-            --electric-purple: #d000ff;
-            --violet: #661cff;
-            --cyan: #6ffcff;
-            --text: #fffaff;
-            --muted: #b9a9c9;
-        }
+<meta name="viewport"
+content="width=device-width, initial-scale=1.0">
 
-        * {
-            box-sizing: border-box;
-        }
+<title>Nexora — Intelligence. Secured.</title>
 
-        body {
-            min-height: 100vh;
-            margin: 0;
-            color: var(--text);
-            font-family: "DM Sans", Arial, sans-serif;
-            background:
-                radial-gradient(circle at 15% 15%, rgba(112, 20, 255, .36), transparent 30%),
-                radial-gradient(circle at 85% 20%, rgba(208, 0, 255, .28), transparent 30%),
-                radial-gradient(circle at 55% 100%, rgba(0, 220, 255, .15), transparent 34%),
-                linear-gradient(135deg, #080512, #150623 48%, #26053c);
-        }
+<style>
 
-        .page {
-            display: flex;
-            justify-content: center;
-            min-height: 100vh;
-            padding: 32px 18px;
-        }
+* {
+    box-sizing: border-box;
+}
 
-        .app {
-            display: flex;
-            width: min(1080px, 100%);
-            min-height: calc(100vh - 64px);
-            overflow: hidden;
-            border: 1px solid rgba(208, 0, 255, .45);
-            border-radius: 26px;
-            background: rgba(8, 5, 18, .62);
-            box-shadow:
-                0 0 35px rgba(208, 0, 255, .2),
-                0 25px 90px rgba(0, 0, 0, .42);
-            backdrop-filter: blur(18px);
-        }
+body {
 
-        .sidebar {
-            width: 245px;
-            flex-shrink: 0;
-            padding: 30px 20px;
-            border-right: 1px solid rgba(208, 0, 255, .25);
-            background: rgba(13, 7, 25, .8);
-        }
+    margin: 0;
 
-        .brand {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
+    min-height: 100vh;
 
-        .logo {
-            display: grid;
-            place-items: center;
-            width: 46px;
-            height: 46px;
-            border: 2px solid var(--cyan);
-            border-radius: 15px;
-            color: white;
-            font: 700 25px "Playfair Display", Georgia, serif;
-            background: linear-gradient(135deg, var(--electric-purple), var(--violet));
-            box-shadow: 0 0 25px rgba(208, 0, 255, .7);
-        }
+    font-family: Arial, sans-serif;
 
-        .brand-name {
-            font: 700 24px "Playfair Display", Georgia, serif;
-        }
+    color: white;
 
-        .slogan {
-            margin: 9px 0 42px 3px;
-            color: var(--cyan);
-            font-size: 12px;
-            letter-spacing: .8px;
-        }
+    background:
+        radial-gradient(
+            circle at 15% 20%,
+            rgba(0,255,255,.22),
+            transparent 30%
+        ),
+        radial-gradient(
+            circle at 85% 20%,
+            rgba(190,0,255,.28),
+            transparent 35%
+        ),
+        linear-gradient(
+            135deg,
+            #05000d,
+            #12001f,
+            #080018
+        );
+}
 
-        .sidebar-button {
-            width: 100%;
-            margin: 5px 0;
-            padding: 13px;
-            border: 1px solid transparent;
-            border-radius: 12px;
-            color: var(--muted);
-            text-align: left;
-            font: inherit;
-            background: transparent;
-            cursor: pointer;
-        }
+.app {
 
-        .sidebar-button:hover {
-            border-color: rgba(208, 0, 255, .3);
-            color: white;
-            background: rgba(208, 0, 255, .15);
-        }
+    width: min(1000px, 92%);
 
-        .connection {
-            margin-top: 42px;
-            padding: 14px;
-            border: 1px solid rgba(111, 252, 255, .2);
-            border-radius: 14px;
-            color: var(--muted);
-            font-size: 12px;
-        }
+    min-height: 90vh;
 
-        .online {
-            margin-bottom: 7px;
-            color: #58f39a;
-            font-weight: 700;
-        }
+    margin: 5vh auto;
 
-        .content {
-            display: flex;
-            flex: 1;
-            flex-direction: column;
-            min-width: 0;
-            padding: 42px clamp(20px, 5vw, 62px);
-        }
+    display: flex;
 
-        .header {
-            margin-bottom: 28px;
-            text-align: center;
-        }
+    flex-direction: column;
 
-        .header-label {
-            margin: 0 0 8px;
-            color: var(--cyan);
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 3px;
-        }
+}
 
-        h1 {
-            margin: 0;
-            font: 700 clamp(38px, 6vw, 64px) "Playfair Display", Georgia, serif;
-            background: linear-gradient(90deg, white, var(--cyan), #e09aff);
-            -webkit-background-clip: text;
-            background-clip: text;
-            color: transparent;
-        }
+.header {
 
-        .header-slogan {
-            margin: 10px 0 0;
-            color: var(--muted);
-            font-size: 14px;
-            letter-spacing: 2px;
-        }
+    text-align: center;
 
-        .chat {
-            flex: 1;
-            min-height: 360px;
-            overflow-y: auto;
-            padding: 25px;
-            border: 1px solid rgba(208, 0, 255, .4);
-            border-radius: 18px;
-            background: rgba(10, 5, 22, .68);
-        }
+    padding: 25px;
 
-        .message {
-            max-width: 82%;
-            margin-bottom: 22px;
-            line-height: 1.6;
-            white-space: pre-wrap;
-        }
+}
 
-        .message.nexora {
-            padding-left: 14px;
-            border-left: 2px solid var(--cyan);
-        }
+.header h1 {
 
-        .message.user {
-            margin-left: auto;
-            padding: 13px 17px;
-            border-radius: 16px 16px 3px 16px;
-            background: linear-gradient(135deg, #8d19df, #5315bb);
-            box-shadow: 0 8px 25px rgba(91, 0, 170, .25);
-        }
+    margin: 0;
 
-        .sender {
-            display: block;
-            margin-bottom: 5px;
-            color: var(--cyan);
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 1.5px;
-        }
+    font-size: 60px;
 
-        .user .sender {
-            color: #f1caff;
-        }
+    background:
+        linear-gradient(
+            90deg,
+            white,
+            #6fffff,
+            #d000ff
+        );
 
-        .composer {
-            display: flex;
-            gap: 10px;
-            margin-top: 17px;
-        }
+    -webkit-background-clip: text;
 
-        input {
-            flex: 1;
-            min-width: 0;
-            padding: 16px 18px;
-            outline: none;
-            border: 1px solid rgba(208, 0, 255, .7);
-            border-radius: 13px;
-            color: white;
-            font: inherit;
-            background: var(--panel-light);
-        }
+    background-clip: text;
 
-        input::placeholder {
-            color: #a894b8;
-        }
+    color: transparent;
 
-        input:focus {
-            border-color: var(--cyan);
-            box-shadow: 0 0 18px rgba(111, 252, 255, .2);
-        }
+}
 
-        .send {
-            padding: 0 22px;
-            border: 0;
-            border-radius: 13px;
-            color: white;
-            font: inherit;
-            font-weight: 700;
-            background: linear-gradient(135deg, var(--electric-purple), var(--violet));
-            box-shadow: 0 0 22px rgba(208, 0, 255, .4);
-            cursor: pointer;
-        }
+.header p {
 
-        .send:hover {
-            filter: brightness(1.2);
-        }
+    color: #6fffff;
 
-        .note {
-            margin: 12px 0 0;
-            color: #796b86;
-            text-align: center;
-            font-size: 11px;
-        }
+    letter-spacing: 4px;
 
-        @media (max-width: 700px) {
-            .page {
-                padding: 0;
-            }
+}
 
-            .app {
-                min-height: 100vh;
-                border: 0;
-                border-radius: 0;
-            }
+.chat {
 
-            .sidebar {
-                display: none;
-            }
+    flex: 1;
 
-            .content {
-                padding: 28px 16px;
-            }
+    min-height: 450px;
 
-            .chat {
-                padding: 18px;
-            }
+    overflow-y: auto;
 
-            .composer {
-                flex-wrap: wrap;
-            }
+    padding: 25px;
 
-            input {
-                flex-basis: 100%;
-            }
+    border: 1px solid rgba(208,0,255,.45);
 
-            .send {
-                height: 48px;
-            }
-        }
-    </style>
+    border-radius: 20px;
+
+    background: rgba(10,5,22,.78);
+
+    box-shadow:
+        0 0 40px rgba(208,0,255,.12);
+
+}
+
+.message {
+
+    max-width: 82%;
+
+    margin-bottom: 18px;
+
+    padding: 14px 17px;
+
+    line-height: 1.6;
+
+    border-radius: 15px;
+
+    white-space: pre-wrap;
+
+}
+
+.message.nexora {
+
+    border-left: 3px solid #6fffff;
+
+    background: rgba(20,20,45,.65);
+
+}
+
+.message.user {
+
+    margin-left: auto;
+
+    background:
+        linear-gradient(
+            135deg,
+            #7c00ff,
+            #b000ff
+        );
+
+}
+
+.sender {
+
+    display: block;
+
+    margin-bottom: 5px;
+
+    color: #6fffff;
+
+    font-size: 11px;
+
+    font-weight: bold;
+
+    letter-spacing: 2px;
+
+}
+
+.composer {
+
+    display: flex;
+
+    gap: 10px;
+
+    margin-top: 15px;
+
+}
+
+input {
+
+    flex: 1;
+
+    min-width: 0;
+
+    padding: 16px;
+
+    border: 1px solid #a000ff;
+
+    border-radius: 12px;
+
+    outline: none;
+
+    color: white;
+
+    background: rgba(20,10,35,.9);
+
+}
+
+button {
+
+    padding: 0 25px;
+
+    border: 0;
+
+    border-radius: 12px;
+
+    color: white;
+
+    font-weight: bold;
+
+    background:
+        linear-gradient(
+            135deg,
+            #d000ff,
+            #6c00ff
+        );
+
+    cursor: pointer;
+
+}
+
+button:hover {
+
+    filter: brightness(1.2);
+
+}
+
+</style>
+
 </head>
+
 <body>
-    <div class="page">
-        <div class="app">
-            <aside class="sidebar">
-                <div class="brand">
-                    <div class="logo">N</div>
-                    <div class="brand-name">Nexora</div>
-                </div>
 
-                <p class="slogan">Intelligence. Secured.</p>
+<div class="app">
 
-                <button class="sidebar-button" onclick="newConversation()">
-                    ＋ New conversation
-                </button>
+<div class="header">
 
-                <button class="sidebar-button" onclick="showNotice('Your local research workspace is ready.')">
-                    ⌕ Research workspace
-                </button>
+<h1>Nexora</h1>
 
-                <button class="sidebar-button" onclick="showNotice('Nexora is running without an external API key.')">
-                    ⚙ Local settings
-                </button>
+<p>INTELLIGENCE. SECURED.</p>
 
-                <div class="connection">
-                    <div class="online">● ONLINE</div>
-                    Local Nexora server<br>
-                    No API key required
-                </div>
-            </aside>
+</div>
 
-            <main class="content">
-                <header class="header">
-                    <p class="header-label">WELCOME TO</p>
-                    <h1>Nexora</h1>
-                    <p class="header-slogan">Intelligence. Secured.</p>
-                </header>
+<div class="chat" id="chat">
 
-                <section class="chat" id="chat">
-                    <div class="message nexora">
-                        <span class="sender">NEXORA</span>
-                        Welcome. Type a message below and I’ll respond with a temporary local placeholder.
-                    </div>
-                </section>
+<div class="message nexora">
 
-                <form class="composer" onsubmit="sendMessage(event)">
-                    <input
-                        id="message"
-                        type="text"
-                        autocomplete="off"
-                        placeholder="Ask Nexora anything..."
-                        autofocus
-                    >
-                    <button class="send" type="submit">Send</button>
-                </form>
+<span class="sender">NEXORA</span>
 
-                <p class="note">Nexora is currently using placeholder responses. An AI model can be connected later.</p>
-            </main>
-        </div>
-    </div>
+Hello. I'm Nexora.
 
-    <script>
-        function escapeHtml(value) {
-            const element = document.createElement("div");
-            element.textContent = value;
-            return element.innerHTML;
-        }
+My Brain v2 is online.
 
-        function addMessage(sender, text, type) {
-            const message = document.createElement("div");
-            message.className = "message " + type;
-            message.innerHTML =
-                '<span class="sender">' + sender + "</span>" +
-                escapeHtml(text);
+</div>
 
-            const chat = document.getElementById("chat");
-            chat.appendChild(message);
-            chat.scrollTop = chat.scrollHeight;
-        }
+</div>
 
-        function showNotice(text) {
-            addMessage("NEXORA", text, "nexora");
-        }
+<form
+class="composer"
+onsubmit="sendMessage(event)"
+>
 
-        function newConversation() {
-            document.getElementById("chat").innerHTML = "";
-            showNotice("A new conversation is ready.");
-        }
+<input
+id="message"
+autocomplete="off"
+placeholder="Ask Nexora anything..."
+>
 
-        async function sendMessage(event) {
-            event.preventDefault();
+<button type="submit">
+Send
+</button>
 
-            const input = document.getElementById("message");
-            const text = input.value.trim();
+</form>
 
-            if (!text) {
-                return;
-            }
+</div>
 
-            addMessage("YOU", text, "user");
-            input.value = "";
-            input.disabled = true;
+<script>
 
-            try {
-                const response = await fetch("/api/chat", {
+function addMessage(sender, text, type) {
+
+    const message =
+        document.createElement("div");
+
+    message.className =
+        "message " + type;
+
+    const senderElement =
+        document.createElement("span");
+
+    senderElement.className =
+        "sender";
+
+    senderElement.textContent =
+        sender;
+
+    message.appendChild(
+        senderElement
+    );
+
+    message.appendChild(
+        document.createTextNode(text)
+    );
+
+    const chat =
+        document.getElementById("chat");
+
+    chat.appendChild(message);
+
+    chat.scrollTop =
+        chat.scrollHeight;
+}
+
+
+async function sendMessage(event) {
+
+    event.preventDefault();
+
+    const input =
+        document.getElementById("message");
+
+    const text =
+        input.value.trim();
+
+    if (!text) {
+        return;
+    }
+
+    addMessage(
+        "YOU",
+        text,
+        "user"
+    );
+
+    input.value = "";
+
+    input.disabled = true;
+
+    try {
+
+        const response =
+            await fetch(
+                "/api/chat",
+                {
                     method: "POST",
+
                     headers: {
-                        "Content-Type": "application/json"
+                        "Content-Type":
+                            "application/json"
                     },
-                    body: JSON.stringify({ message: text })
-                });
 
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || "Request failed");
+                    body:
+                        JSON.stringify({
+                            message: text
+                        })
                 }
+            );
 
-                addMessage("NEXORA", data.reply, "nexora");
-            } catch (error) {
-                showNotice("The server could not process that message.");
-            } finally {
-                input.disabled = false;
-                input.focus();
-            }
-        }
-    </script>
+        const data =
+            await response.json();
+
+        addMessage(
+            "NEXORA",
+            data.reply ||
+            "I couldn't generate a response.",
+            "nexora"
+        );
+
+    } catch (error) {
+
+        addMessage(
+            "NEXORA",
+            "I couldn't connect to my backend.",
+            "nexora"
+        );
+
+    } finally {
+
+        input.disabled = false;
+
+        input.focus();
+
+    }
+
+}
+
+</script>
+
 </body>
+
 </html>
 """
 
 
+# ============================================================
+# HTTP SERVER
+# ============================================================
+
 class NexoraHandler(BaseHTTPRequestHandler):
-    def send_bytes(self, body, content_type, status=200):
+
+    def send_bytes(
+        self,
+        body,
+        content_type,
+        status=200
+    ):
+
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+
+        self.send_header(
+            "Content-Type",
+            content_type
+        )
+
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
+
+        self.send_header(
+            "Cache-Control",
+            "no-store"
+        )
+
         self.end_headers()
+
         self.wfile.write(body)
 
-    def send_json(self, data, status=200):
-        body = json.dumps(data).encode("utf-8")
-        self.send_bytes(body, "application/json; charset=utf-8", status)
+
+    def send_json(
+        self,
+        data,
+        status=200
+    ):
+
+        body = json.dumps(
+            data
+        ).encode("utf-8")
+
+        self.send_bytes(
+            body,
+            "application/json; charset=utf-8",
+            status
+        )
+
 
     def do_GET(self):
-        path = urlparse(self.path).path
+
+        path = urlparse(
+            self.path
+        ).path
 
         if path == "/":
-            self.send_bytes(HTML.encode("utf-8"), "text/html; charset=utf-8")
+
+            self.send_bytes(
+                HTML.encode("utf-8"),
+                "text/html; charset=utf-8"
+            )
+
         elif path == "/health":
-            self.send_json({"status": "ok", "agent": "Nexora"})
+
+            self.send_json({
+                "status": "ok",
+                "agent": NAME,
+                "brain": "v2"
+            })
+
         else:
-            self.send_json({"error": "Not found"}, 404)
+
+            self.send_json(
+                {"error": "Not found"},
+                404
+            )
+
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/chat":
-            self.send_json({"error": "Not found"}, 404)
+
+        path = urlparse(
+            self.path
+        ).path
+
+        if path != "/api/chat":
+
+            self.send_json(
+                {"error": "Not found"},
+                404
+            )
+
             return
 
         try:
-            content_length = int(self.headers.get("Content-Length", "0"))
 
-            if content_length > 1_000_000:
-                self.send_json({"error": "Request is too large"}, 413)
-                return
-
-            raw_body = self.rfile.read(content_length)
-            data = json.loads(raw_body.decode("utf-8"))
-            message = str(data.get("message", "")).strip()
-
-            if not message:
-                self.send_json({"error": "Message cannot be empty"}, 400)
-                return
-
-            reply = (
-                f"I received your message: “{message}”\n\n"
-                "This is a temporary Nexora placeholder response. "
-                "The backend is connected and ready for an AI model."
+            length = int(
+                self.headers.get(
+                    "Content-Length",
+                    "0"
+                )
             )
 
-            self.send_json({"reply": reply})
+            if length > 1_000_000:
 
-        except (ValueError, TypeError, json.JSONDecodeError):
-            self.send_json({"error": "Invalid JSON request"}, 400)
-        except Exception:
-            self.send_json({"error": "Internal server error"}, 500)
+                self.send_json(
+                    {"error": "Request too large"},
+                    413
+                )
 
-    def log_message(self, format_string, *args):
+                return
+
+            body = self.rfile.read(
+                length
+            )
+
+            data = json.loads(
+                body.decode("utf-8")
+            )
+
+            message = str(
+                data.get("message", "")
+            ).strip()
+
+            if not message:
+
+                self.send_json(
+                    {"error": "Message cannot be empty"},
+                    400
+                )
+
+                return
+
+            reply = process_message(
+                message
+            )
+
+            self.send_json({
+                "reply": reply
+            })
+
+        except json.JSONDecodeError:
+
+            self.send_json(
+                {"error": "Invalid JSON"},
+                400
+            )
+
+        except Exception as error:
+
+            print(
+                "SERVER ERROR:",
+                error
+            )
+
+            self.send_json(
+                {"error": "Internal server error"},
+                500
+            )
+
+
+    def log_message(
+        self,
+        format_string,
+        *args
+    ):
+
         return
 
 
-def main():
-    server = ThreadingHTTPServer((HOST, PORT), NexoraHandler)
+# ============================================================
+# START SERVER
+# ============================================================
 
-    print(f"Nexora is running on port {PORT}")
-    print("Listening on 0.0.0.0")
-    print("Press Ctrl+C to stop.")
+def main():
+
+    server = ThreadingHTTPServer(
+        (HOST, PORT),
+        NexoraHandler
+    )
+
+    print(
+        f"{NAME} is running on port {PORT}"
+    )
+
+    print(
+        "Brain v2: ONLINE"
+    )
+
+    print(
+        "Memory: ENABLED"
+    )
+
+    print(
+        "Intent system: ENABLED"
+    )
+
+    print(
+        "Knowledge system: ENABLED"
+    )
+
+    print(
+        "Calculator: ENABLED"
+    )
+
+    print(
+        "Safety system: ENABLED"
+    )
 
     try:
+
         server.serve_forever()
+
     except KeyboardInterrupt:
-        print("\nNexora stopped.")
+
+        print(
+            "\nNexora stopped."
+        )
+
     finally:
+
         server.server_close()
 
 
