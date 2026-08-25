@@ -1,0 +1,35 @@
+Nexora v10
+
+Intelligence. Secured.
+
+Nexora is a local-first AI assistant built in Python without requiring an external language model. It combines deterministic reasoning, memory, knowledge retrieval, conversation context, intent detection, calculation, safety checks, and security controls.
+
+Features
+🧠 Local reasoning engine
+💾 Persistent memory
+📚 User-controlled knowledge base
+💬 Conversation context
+🎯 Intent detection
+🧮 Safe mathematical calculator
+🎭 Multiple personality modes
+🔐 API-key authentication
+🛡️ Security monitoring
+🚦 Rate limiting
+🔒 Secret detection
+🧯 Fail-closed error handling
+🌐 Browser-based interface
+❤️ Health endpoint
+🚫 No arbitrary Python execution
+🚫 No shell-command execution
+🚫 No external AI model required by default
+
+Nexora/
+├── main.py
+├── requirements.txt
+├── .gitignore
+└── README.md
+## Project Status
+
+Nexora v10 is under active development.
+
+The project currently focuses on building a secure, local-first reasoning assistant without requiring a large external language model.
