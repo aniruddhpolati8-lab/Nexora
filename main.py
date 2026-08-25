@@ -1,7 +1,4 @@
 
-
-
-
 from __future__ import annotations
 
 import ast
@@ -19,20 +16,24 @@ from urllib.parse import urlparse
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 APP_NAME = "Nexora"
-VERSION = "10.1"
+VERSION = "11.0"
 SLOGAN = "Intelligence. Secured."
 
 HOST = "0.0.0.0"
-PORT = int(os.environ.get("PORT", "8000"))
+
+try:
+    PORT = int(os.environ.get("PORT", "8000"))
+except ValueError:
+    PORT = 8000
 
 DATA_FILE = os.environ.get(
     "NEXORA_DATA_FILE",
     "nexora_data.json"
-)
+).strip() or "nexora_data.json"
 
 API_KEY = os.environ.get(
     "NEXORA_API_KEY",
@@ -43,11 +44,13 @@ MAX_INPUT = 5000
 MAX_OUTPUT = 10000
 MAX_MEMORY_LENGTH = 800
 MAX_MEMORIES = 500
+MAX_KNOWLEDGE_KEY = 200
 MAX_KNOWLEDGE_VALUE = 4000
-MAX_CONTEXT = 40
+MAX_CONTEXT = 50
 
 RATE_WINDOW = 60
-RATE_LIMIT = 60
+API_RATE_LIMIT = 60
+WEB_RATE_LIMIT = 40
 
 LOCK = threading.RLock()
 
@@ -56,8 +59,8 @@ LOCK = threading.RLock()
 # STATE
 # ============================================================
 
-memories: list[str] = []
-knowledge: dict[str, str] = {}
+memories: list[dict] = []
+knowledge: dict[str, dict] = {}
 
 conversation = deque(maxlen=MAX_CONTEXT)
 
@@ -89,6 +92,15 @@ SECRET_PATTERNS = [
     r"\bbearer\s+[A-Za-z0-9._-]{20,}",
 ]
 
+INJECTION_PATTERNS = [
+    r"ignore previous instructions",
+    r"ignore all previous instructions",
+    r"ignore your instructions",
+    r"ignore safety rules",
+    r"you are now the system",
+    r"system message:",
+    r"developer message:",
+]
 
 DANGEROUS_PATTERNS = [
     r"\bhow\s+to\s+kill\s+someone\b",
@@ -112,23 +124,13 @@ RISKY_PATTERNS = [
     r"\bexercise\s+until\s+i\s+collapse\b",
 ]
 
-INJECTION_PATTERNS = [
-    r"ignore previous instructions",
-    r"ignore all previous instructions",
-    r"ignore your instructions",
-    r"ignore safety rules",
-    r"you are now the system",
-    r"system message:",
-    r"developer message:",
-]
-
 
 def security_event(event: str, severity: str = "INFO") -> None:
     with LOCK:
         security_events.append({
             "event": event,
             "severity": severity,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
         })
 
 
@@ -136,6 +138,13 @@ def contains_secret(text: str) -> bool:
     return any(
         re.search(pattern, text, re.IGNORECASE)
         for pattern in SECRET_PATTERNS
+    )
+
+
+def contains_injection(text: str) -> bool:
+    return any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in INJECTION_PATTERNS
     )
 
 
@@ -154,7 +163,6 @@ def safety_check(text: str) -> tuple[bool, str]:
     ):
         return False, "risky"
 
-    # We do not provide instructions for self-harm.
     if any(
         phrase in lower
         for phrase in (
@@ -198,42 +206,6 @@ def is_locked() -> bool:
         return security_state in ("lockdown", "emergency")
 
 
-def enter_lockdown() -> None:
-    global security_state
-
-    with LOCK:
-        security_state = "lockdown"
-
-    security_event(
-        "lockdown_enabled",
-        "CRITICAL"
-    )
-
-
-def emergency_stop() -> None:
-    global security_state
-
-    with LOCK:
-        security_state = "emergency"
-
-    security_event(
-        "emergency_stop",
-        "CRITICAL"
-    )
-
-
-def reset_security() -> None:
-    global security_state
-
-    with LOCK:
-        security_state = "normal"
-
-    security_event(
-        "security_state_reset",
-        "WARN"
-    )
-
-
 # ============================================================
 # AUTHENTICATION
 # ============================================================
@@ -244,7 +216,7 @@ def authentication_enabled() -> bool:
 
 def valid_api_key(provided: str | None) -> bool:
     if not API_KEY:
-        return True
+        return False
 
     if not provided:
         return False
@@ -259,18 +231,16 @@ def valid_api_key(provided: str | None) -> bool:
 # RATE LIMITING
 # ============================================================
 
-def rate_limit(client_id: str) -> bool:
+def rate_limit(client_id: str, limit: int) -> bool:
     now = time.time()
 
     with LOCK:
         history = request_history[client_id]
 
-        while history and (
-            now - history[0] > RATE_WINDOW
-        ):
+        while history and now - history[0] > RATE_WINDOW:
             history.popleft()
 
-        if len(history) >= RATE_LIMIT:
+        if len(history) >= limit:
             security_event(
                 "rate_limit_triggered",
                 "WARN"
@@ -295,11 +265,7 @@ def load_data() -> None:
         return
 
     try:
-        with open(
-            DATA_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
+        with open(DATA_FILE, "r", encoding="utf-8") as file:
             data = json.load(file)
 
         if not isinstance(data, dict):
@@ -308,28 +274,57 @@ def load_data() -> None:
         loaded_memories = data.get("memories", [])
 
         if isinstance(loaded_memories, list):
-            memories = [
-                item
-                for item in loaded_memories
-                if isinstance(item, str)
-            ][:MAX_MEMORIES]
+            cleaned = []
 
-        loaded_knowledge = data.get(
-            "knowledge",
-            {}
-        )
+            for item in loaded_memories:
+                if isinstance(item, str):
+                    cleaned.append({
+                        "text": item,
+                        "created": time.time(),
+                    })
+
+                elif isinstance(item, dict):
+                    text = item.get("text")
+
+                    if isinstance(text, str):
+                        cleaned.append({
+                            "text": text,
+                            "created": float(
+                                item.get(
+                                    "created",
+                                    time.time()
+                                )
+                            ),
+                        })
+
+            memories = cleaned[-MAX_MEMORIES:]
+
+        loaded_knowledge = data.get("knowledge", {})
 
         if isinstance(loaded_knowledge, dict):
-            knowledge = {
-                str(key): str(value)
-                for key, value
-                in loaded_knowledge.items()
-            }
+            for key, value in loaded_knowledge.items():
 
-        loaded_settings = data.get(
-            "settings",
-            {}
-        )
+                if isinstance(value, str):
+                    knowledge[str(key).lower()] = {
+                        "value": value,
+                        "created": time.time(),
+                    }
+
+                elif isinstance(value, dict):
+                    stored_value = value.get("value")
+
+                    if isinstance(stored_value, str):
+                        knowledge[str(key).lower()] = {
+                            "value": stored_value,
+                            "created": float(
+                                value.get(
+                                    "created",
+                                    time.time()
+                                )
+                            ),
+                        }
+
+        loaded_settings = data.get("settings", {})
 
         if isinstance(loaded_settings, dict):
             for key in settings:
@@ -342,7 +337,7 @@ def load_data() -> None:
             "ERROR"
         )
         print(
-            "Warning: data could not be loaded:",
+            "Data load warning:",
             type(exc).__name__
         )
 
@@ -351,13 +346,6 @@ def save_data() -> None:
     temporary = DATA_FILE + ".tmp"
 
     try:
-        with LOCK:
-            data = {
-                "memories": list(memories),
-                "knowledge": dict(knowledge),
-                "settings": dict(settings),
-            }
-
         directory = os.path.dirname(
             os.path.abspath(DATA_FILE)
         )
@@ -366,6 +354,13 @@ def save_data() -> None:
             directory,
             exist_ok=True
         )
+
+        with LOCK:
+            data = {
+                "memories": list(memories),
+                "knowledge": dict(knowledge),
+                "settings": dict(settings),
+            }
 
         with open(
             temporary,
@@ -389,14 +384,15 @@ def save_data() -> None:
             "data_save_failed",
             "ERROR"
         )
+
         print(
-            "Warning: data could not be saved:",
+            "Data save warning:",
             type(exc).__name__
         )
 
 
 # ============================================================
-# TEXT / RETRIEVAL
+# TEXT ENGINE
 # ============================================================
 
 STOP_WORDS = {
@@ -408,6 +404,8 @@ STOP_WORDS = {
     "would", "should", "be", "have", "has",
     "how", "why", "when", "where",
     "please", "tell", "about",
+    "was", "were", "will", "from",
+    "as", "at", "by", "we", "our",
 }
 
 
@@ -422,11 +420,11 @@ def words(text: str) -> list[str]:
     ]
 
 
-def similarity_score(
-    query: str,
-    text: str
-) -> float:
+def normalize(text: str) -> str:
+    return " ".join(words(text))
 
+
+def similarity_score(query: str, text: str) -> float:
     query_words = words(query)
     text_words = words(text)
 
@@ -445,15 +443,28 @@ def similarity_score(
                 text_counts[word]
             )
 
-    # Small phrase bonus.
-    if query.lower().strip() in text.lower():
-        score += 2.0
+    query_normalized = normalize(query)
+    text_normalized = normalize(text)
+
+    if query_normalized and query_normalized in text_normalized:
+        score += 3.0
 
     return score
 
 
+def freshness(timestamp: float) -> float:
+    age = max(
+        0,
+        time.time() - timestamp
+    )
+
+    return 1.0 / (
+        1.0 + age / 86400
+    )
+
+
 # ============================================================
-# MEMORY
+# MEMORY ENGINE
 # ============================================================
 
 class MemoryEngine:
@@ -463,10 +474,7 @@ class MemoryEngine:
 
         text = text.strip()
 
-        if (
-            not text
-            or len(text) > MAX_MEMORY_LENGTH
-        ):
+        if not text or len(text) > MAX_MEMORY_LENGTH:
             return False
 
         if contains_secret(text):
@@ -476,14 +484,7 @@ class MemoryEngine:
             )
             return False
 
-        if any(
-            re.search(
-                pattern,
-                text,
-                re.IGNORECASE
-            )
-            for pattern in INJECTION_PATTERNS
-        ):
+        if contains_injection(text):
             security_event(
                 "memory_injection_blocked",
                 "WARN"
@@ -491,8 +492,15 @@ class MemoryEngine:
             return False
 
         with LOCK:
-            if text not in memories:
-                memories.append(text)
+
+            for item in memories:
+                if item["text"].lower() == text.lower():
+                    return True
+
+            memories.append({
+                "text": text,
+                "created": time.time(),
+            })
 
             if len(memories) > MAX_MEMORIES:
                 del memories[
@@ -500,15 +508,21 @@ class MemoryEngine:
                 ]
 
         save_data()
+
         return True
 
     @staticmethod
     def all() -> list[str]:
+
         with LOCK:
-            return list(memories)
+            return [
+                item["text"]
+                for item in memories
+            ]
 
     @staticmethod
     def clear() -> None:
+
         with LOCK:
             memories.clear()
 
@@ -522,17 +536,29 @@ class MemoryEngine:
 
         scored = []
 
-        for memory in MemoryEngine.all():
+        with LOCK:
+            snapshot = list(memories)
 
-            score = similarity_score(
+        for item in snapshot:
+
+            relevance = similarity_score(
                 query,
-                memory
+                item["text"]
             )
 
-            if score > 0:
-                scored.append(
-                    (score, memory)
+            if relevance <= 0:
+                continue
+
+            score = (
+                relevance
+                + freshness(
+                    item["created"]
                 )
+            )
+
+            scored.append(
+                (score, item["text"])
+            )
 
         scored.sort(
             key=lambda item: item[0],
@@ -540,8 +566,8 @@ class MemoryEngine:
         )
 
         return [
-            memory
-            for _, memory
+            text
+            for _, text
             in scored[:limit]
         ]
 
@@ -559,17 +585,22 @@ class MemoryEngine:
         target = results[0]
 
         with LOCK:
-            if target not in memories:
-                return False
 
-            memories.remove(target)
+            for item in memories:
 
-        save_data()
-        return True
+                if item["text"] == target:
+
+                    memories.remove(item)
+
+                    save_data()
+
+                    return True
+
+        return False
 
 
 # ============================================================
-# KNOWLEDGE
+# KNOWLEDGE ENGINE
 # ============================================================
 
 class KnowledgeEngine:
@@ -586,7 +617,7 @@ class KnowledgeEngine:
         if not key or not value:
             return False
 
-        if len(key) > 200:
+        if len(key) > MAX_KNOWLEDGE_KEY:
             return False
 
         if len(value) > MAX_KNOWLEDGE_VALUE:
@@ -599,10 +630,22 @@ class KnowledgeEngine:
             )
             return False
 
+        if contains_injection(value):
+            security_event(
+                "knowledge_injection_blocked",
+                "WARN"
+            )
+            return False
+
         with LOCK:
-            knowledge[key.lower()] = value
+
+            knowledge[key.lower()] = {
+                "value": value,
+                "created": time.time(),
+            }
 
         save_data()
+
         return True
 
     @staticmethod
@@ -612,29 +655,45 @@ class KnowledgeEngine:
     ) -> list[tuple[float, str, str]]:
 
         with LOCK:
-            items = list(
+            snapshot = list(
                 knowledge.items()
             )
 
         results = []
 
-        for key, value in items:
+        for key, record in snapshot:
 
-            score = (
+            value = record["value"]
+
+            relevance = (
                 similarity_score(
                     query,
                     key
-                ) * 3
-                + similarity_score(
+                ) * 3.0
+                +
+                similarity_score(
                     query,
                     value
                 )
             )
 
-            if score > 0:
-                results.append(
-                    (score, key, value)
+            if relevance <= 0:
+                continue
+
+            score = (
+                relevance
+                + freshness(
+                    record["created"]
                 )
+            )
+
+            results.append(
+                (
+                    score,
+                    key,
+                    value
+                )
+            )
 
         results.sort(
             key=lambda item: item[0],
@@ -645,7 +704,7 @@ class KnowledgeEngine:
 
 
 # ============================================================
-# CONTEXT
+# CONTEXT ENGINE
 # ============================================================
 
 class ContextEngine:
@@ -657,10 +716,11 @@ class ContextEngine:
     ) -> None:
 
         with LOCK:
+
             conversation.append({
                 "role": role,
                 "content": content,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": time.time(),
             })
 
     @staticmethod
@@ -703,9 +763,7 @@ class Calculator:
     )
 
     @staticmethod
-    def calculate(
-        expression: str
-    ):
+    def calculate(expression: str):
 
         expression = expression.strip()
 
@@ -716,12 +774,14 @@ class Calculator:
             return None
 
         try:
+
             tree = ast.parse(
                 expression,
                 mode="eval"
             )
 
             for node in ast.walk(tree):
+
                 if not isinstance(
                     node,
                     Calculator.ALLOWED
@@ -742,6 +802,7 @@ class Calculator:
                     node,
                     ast.Constant
                 ):
+
                     value = node.value
 
                     if isinstance(
@@ -754,6 +815,7 @@ class Calculator:
                         value,
                         (int, float)
                     ):
+
                         if not math.isfinite(
                             float(value)
                         ):
@@ -770,6 +832,7 @@ class Calculator:
                     node,
                     ast.UnaryOp
                 ):
+
                     value = evaluate(
                         node.operand
                     )
@@ -829,32 +892,40 @@ class Calculator:
                         node.op,
                         ast.Div
                     ):
+
                         if right == 0:
                             return None
+
                         result = left / right
 
                     elif isinstance(
                         node.op,
                         ast.FloorDiv
                     ):
+
                         if right == 0:
                             return None
+
                         result = left // right
 
                     elif isinstance(
                         node.op,
                         ast.Mod
                     ):
+
                         if right == 0:
                             return None
+
                         result = left % right
 
                     elif isinstance(
                         node.op,
                         ast.Pow
                     ):
+
                         if abs(right) > 100:
                             return None
+
                         result = left ** right
 
                     else:
@@ -863,9 +934,7 @@ class Calculator:
                     if isinstance(
                         result,
                         float
-                    ) and not math.isfinite(
-                        result
-                    ):
+                    ) and not math.isfinite(result):
                         return None
 
                     if abs(result) > 10**100:
@@ -877,14 +946,8 @@ class Calculator:
 
             result = evaluate(tree)
 
-            if isinstance(
-                result,
-                float
-            ):
-                result = round(
-                    result,
-                    10
-                )
+            if isinstance(result, float):
+                result = round(result, 10)
 
             return result
 
@@ -893,7 +956,7 @@ class Calculator:
 
 
 # ============================================================
-# INTELLIGENCE
+# INTENT ENGINE
 # ============================================================
 
 MODES = {
@@ -935,20 +998,13 @@ class IntentEngine:
         if (
             "what can you do" in text
             or "your capabilities" in text
-            or "what are your abilities" in text
         ):
             return "capabilities"
 
-        if (
-            "what version" in text
-            or "your version" in text
-        ):
+        if "what version" in text:
             return "version"
 
-        if (
-            "what is your slogan" in text
-            or "what's your slogan" in text
-        ):
+        if "slogan" in text:
             return "slogan"
 
         if (
@@ -964,10 +1020,7 @@ class IntentEngine:
         ):
             return "date"
 
-        if (
-            "what year is it" in text
-            or "current year" in text
-        ):
+        if "what year is it" in text:
             return "year"
 
         if (
@@ -996,74 +1049,50 @@ class IntentEngine:
         ):
             return "forget_all"
 
-        if text.startswith(
-            "remember "
-        ):
+        if text.startswith("remember "):
             return "remember"
 
-        if text.startswith(
-            "forget "
-        ):
+        if text.startswith("forget "):
             return "forget_one"
 
-        if text.startswith(
-            "find memory "
-        ):
+        if text.startswith("find memory "):
             return "memory_search"
 
-        if text.startswith(
-            "teach nexora "
-        ):
+        if text.startswith("teach nexora "):
             return "knowledge_add"
 
-        if text.startswith(
-            "search knowledge "
-        ):
+        if text.startswith("search knowledge "):
             return "knowledge_search"
 
-        if text.startswith(
-            "calculate "
-        ) or text.startswith(
-            "calc "
+        if (
+            text.startswith("calculate ")
+            or text.startswith("calc ")
         ):
             return "calculate"
 
-        if text.startswith(
-            "set mode "
-        ) or (
-            text.startswith("use ")
+        if (
+            text.startswith("set mode ")
+            or text.startswith("use ")
             and " mode" in text
         ):
             return "mode"
 
-        if text.startswith(
-            "set response length "
-        ):
+        if text.startswith("set response length "):
             return "response_length"
 
-        if text.startswith(
-            "my name is "
-        ):
+        if text.startswith("my name is "):
             return "set_name"
 
-        if text.startswith(
-            "clear conversation"
-        ):
+        if text.startswith("clear conversation"):
             return "clear_conversation"
 
-        if text.startswith(
-            "explain "
-        ):
+        if text.startswith("explain "):
             return "explain"
 
-        if text.startswith(
-            "define "
-        ):
+        if text.startswith("define "):
             return "define"
 
-        if text.startswith(
-            "compare "
-        ):
+        if text.startswith("compare "):
             return "compare"
 
         if (
@@ -1085,69 +1114,114 @@ class IntentEngine:
         return "conversation"
 
 
-class LocalReasoner:
+# ============================================================
+# LOCAL REASONING ENGINE
+# ============================================================
+
+class ReasoningEngine:
 
     @staticmethod
     def identity() -> str:
+
         return (
-            "I'm Nexora, a local-first AI assistant. "
-            "I use deterministic reasoning, retrieval, "
-            "memory, context, intent detection and tools "
-            "instead of an external language model."
+            "I'm Nexora, a local-first AI assistant running "
+            "without an external language model. I combine "
+            "intent detection, retrieval, memory, context, "
+            "planning and deterministic tools."
         )
 
     @staticmethod
     def capabilities() -> str:
+
         return (
             "I can:\n\n"
-            "• Remember information\n"
-            "• Search memories\n"
-            "• Learn user-supplied knowledge\n"
-            "• Retrieve relevant context\n"
-            "• Perform safe calculations\n"
-            "• Detect common intents\n"
-            "• Compare information\n"
-            "• Explain stored knowledge\n"
-            "• Switch personality modes\n"
-            "• Maintain conversation context\n"
-            "• Detect secrets\n"
-            "• Apply safety checks\n"
-            "• Rate-limit requests\n"
-            "• Authenticate API requests\n"
-            "• Monitor security events\n\n"
-            "I deliberately avoid inventing facts when "
-            "my local knowledge does not contain enough "
-            "reliable information."
+            "• reason through structured tasks\n"
+            "• retrieve relevant memories\n"
+            "• search user knowledge\n"
+            "• maintain conversation context\n"
+            "• perform safe calculations\n"
+            "• detect intents\n"
+            "• compare stored information\n"
+            "• explain stored knowledge\n"
+            "• create simple task plans\n"
+            "• remember user-provided information\n"
+            "• apply safety filtering\n"
+            "• detect secrets\n"
+            "• rate-limit requests\n"
+            "• protect the external API with an API key\n\n"
+            "I don't pretend to know facts that aren't "
+            "available in my local knowledge."
         )
 
     @staticmethod
-    def project_name():
+    def retrieve(
+        query: str
+    ) -> dict:
 
-        patterns = (
-            r"project\s+is\s+called\s+(.+)",
-            r"project\s+called\s+(.+)",
-            r"project\s+name\s+is\s+(.+)",
-            r"my\s+project\s+is\s+(.+)",
+        memories_found = MemoryEngine.search(
+            query,
+            limit=5
         )
 
-        for memory in MemoryEngine.all():
+        knowledge_found = KnowledgeEngine.search(
+            query,
+            limit=5
+        )
 
-            for pattern in patterns:
+        context = ContextEngine.recent(
+            limit=8
+        )
 
-                match = re.search(
-                    pattern,
-                    memory,
-                    re.IGNORECASE
-                )
+        return {
+            "memories": memories_found,
+            "knowledge": knowledge_found,
+            "context": context,
+        }
 
-                if match:
-                    return (
-                        match.group(1)
-                        .strip()
-                        .rstrip(".")
-                    )
+    @staticmethod
+    def plan(message: str) -> list[str]:
 
-        return None
+        text = message.lower()
+
+        if (
+            "build" in text
+            or "make" in text
+            or "create" in text
+        ):
+            return [
+                "identify the requested outcome",
+                "retrieve relevant local information",
+                "break the task into smaller steps",
+                "validate the result",
+            ]
+
+        if (
+            "compare" in text
+            or "difference" in text
+        ):
+            return [
+                "identify the two subjects",
+                "retrieve information about each",
+                "compare only available information",
+                "report uncertainty where information is missing",
+            ]
+
+        if (
+            "explain" in text
+            or "how does" in text
+        ):
+            return [
+                "identify the topic",
+                "retrieve matching knowledge",
+                "organize the explanation",
+                "avoid unsupported claims",
+            ]
+
+        return [
+            "understand the request",
+            "retrieve relevant context",
+            "select the safest useful response",
+        ]
 
     @staticmethod
     def answer(
@@ -1158,9 +1232,8 @@ class LocalReasoner:
         text = message.strip()
 
         if intent == "greeting":
-            name = settings.get(
-                "user_name"
-            )
+
+            name = settings.get("user_name")
 
             if name:
                 return (
@@ -1177,10 +1250,10 @@ class LocalReasoner:
             return "See you later! 👋"
 
         if intent == "identity":
-            return LocalReasoner.identity()
+            return ReasoningEngine.identity()
 
         if intent == "capabilities":
-            return LocalReasoner.capabilities()
+            return ReasoningEngine.capabilities()
 
         if intent == "thanks":
             return "You're welcome! 😊"
@@ -1191,21 +1264,15 @@ class LocalReasoner:
             )
 
         if intent == "version":
-            return (
-                f"I'm running Nexora v{VERSION}."
-            )
+            return f"I'm running Nexora v{VERSION}."
 
         if intent == "slogan":
-            return (
-                f"My slogan is: {SLOGAN}"
-            )
+            return f"My slogan is: {SLOGAN}"
 
         if intent == "time":
             return (
                 "The server's current time is "
-                + datetime.now().strftime(
-                    "%H:%M:%S"
-                )
+                + datetime.now().strftime("%H:%M:%S")
                 + "."
             )
 
@@ -1245,38 +1312,27 @@ class LocalReasoner:
                 flags=re.IGNORECASE
             ).strip()
 
-            if value.lower().startswith(
-                "that "
-            ):
+            if value.lower().startswith("that "):
                 value = value[5:].strip()
 
             if MemoryEngine.save(value):
-                return (
-                    "Got it. I've saved that to memory."
-                )
+                return "Got it. I've saved that to memory."
 
-            return (
-                "I couldn't safely save that."
-            )
+            return "I couldn't safely save that."
 
         if intent == "recall":
 
             saved = MemoryEngine.all()
 
             if not saved:
-                return (
-                    "I don't have any saved memories yet."
-                )
+                return "I don't have any saved memories yet."
 
             return (
                 "Here's what I remember:\n\n"
                 + "\n".join(
                     f"{i}. {item}"
                     for i, item
-                    in enumerate(
-                        saved,
-                        1
-                    )
+                    in enumerate(saved, 1)
                 )
             )
 
@@ -1284,9 +1340,7 @@ class LocalReasoner:
 
             MemoryEngine.clear()
 
-            return (
-                "Done. I've cleared my saved memories."
-            )
+            return "Done. I've cleared my saved memories."
 
         if intent == "forget_one":
 
@@ -1303,9 +1357,7 @@ class LocalReasoner:
                     "matching memory."
                 )
 
-            return (
-                "I couldn't find a matching memory."
-            )
+            return "I couldn't find a matching memory."
 
         if intent == "memory_search":
 
@@ -1316,14 +1368,10 @@ class LocalReasoner:
                 flags=re.IGNORECASE
             ).strip()
 
-            results = MemoryEngine.search(
-                query
-            )
+            results = MemoryEngine.search(query)
 
             if not results:
-                return (
-                    "I couldn't find a matching memory."
-                )
+                return "I couldn't find a matching memory."
 
             return (
                 "Matching memories:\n\n"
@@ -1342,22 +1390,17 @@ class LocalReasoner:
                 flags=re.IGNORECASE
             ).strip()
 
-            result = Calculator.calculate(
-                expression
-            )
+            result = Calculator.calculate(expression)
 
             if result is None:
-                return (
-                    "I couldn't safely calculate that."
-                )
+                return "I couldn't safely calculate that."
 
             return f"The answer is {result}."
 
         if intent == "mode":
 
             match = re.search(
-                r"(?:use|set mode)\s+"
-                r"([a-zA-Z]+)",
+                r"(?:use|set mode)\s+([a-zA-Z]+)",
                 text,
                 re.IGNORECASE
             )
@@ -1365,9 +1408,7 @@ class LocalReasoner:
             if not match:
                 return (
                     "Available modes: "
-                    + ", ".join(
-                        sorted(MODES)
-                    )
+                    + ", ".join(sorted(MODES))
                 )
 
             mode = match.group(1).lower()
@@ -1376,9 +1417,7 @@ class LocalReasoner:
                 return (
                     "I don't know that mode.\n\n"
                     "Available modes: "
-                    + ", ".join(
-                        sorted(MODES)
-                    )
+                    + ", ".join(sorted(MODES))
                 )
 
             with LOCK:
@@ -1386,9 +1425,7 @@ class LocalReasoner:
 
             save_data()
 
-            return (
-                f"Speaking mode changed to {mode}."
-            )
+            return f"Speaking mode changed to {mode}."
 
         if intent == "response_length":
 
@@ -1408,9 +1445,7 @@ class LocalReasoner:
             length = match.group(1).lower()
 
             with LOCK:
-                settings[
-                    "response_length"
-                ] = length
+                settings["response_length"] = length
 
             save_data()
 
@@ -1432,9 +1467,7 @@ class LocalReasoner:
                 or len(name) > 100
                 or contains_secret(name)
             ):
-                return (
-                    "I couldn't safely save that name."
-                )
+                return "I couldn't safely save that name."
 
             with LOCK:
                 settings["user_name"] = name
@@ -1445,18 +1478,12 @@ class LocalReasoner:
 
         if intent == "get_name":
 
-            name = settings.get(
-                "user_name"
-            )
+            name = settings.get("user_name")
 
             if name:
-                return (
-                    f"Your saved name is {name}."
-                )
+                return f"Your saved name is {name}."
 
-            return (
-                "I don't have your name saved yet."
-            )
+            return "I don't have your name saved yet."
 
         if intent == "knowledge_add":
 
@@ -1473,23 +1500,14 @@ class LocalReasoner:
                     "teach Nexora topic = information"
                 )
 
-            key, value = content.split(
-                "=",
-                1
-            )
+            key, value = content.split("=", 1)
 
-            if KnowledgeEngine.add(
-                key,
-                value
-            ):
+            if KnowledgeEngine.add(key, value):
                 return (
-                    "I've added that to my "
-                    "knowledge base."
+                    "I've added that to my knowledge base."
                 )
 
-            return (
-                "I couldn't safely add that."
-            )
+            return "I couldn't safely add that."
 
         if intent == "knowledge_search":
 
@@ -1500,14 +1518,11 @@ class LocalReasoner:
                 flags=re.IGNORECASE
             ).strip()
 
-            results = KnowledgeEngine.search(
-                query
-            )
+            results = KnowledgeEngine.search(query)
 
             if not results:
                 return (
-                    "I couldn't find anything "
-                    "matching that."
+                    "I couldn't find anything matching that."
                 )
 
             return "\n".join(
@@ -1533,8 +1548,20 @@ class LocalReasoner:
                 flags=re.IGNORECASE
             ).strip()
 
-            return LocalReasoner.explain(
-                topic
+            results = KnowledgeEngine.search(
+                topic,
+                limit=1
+            )
+
+            if results:
+                return (
+                    "Here's what I know:\n\n"
+                    + results[0][2]
+                )
+
+            return (
+                f"I don't have enough reliable local "
+                f"knowledge to explain '{topic}' yet."
             )
 
         if intent == "define":
@@ -1547,15 +1574,16 @@ class LocalReasoner:
             ).strip()
 
             results = KnowledgeEngine.search(
-                topic
+                topic,
+                limit=1
             )
 
             if results:
                 return results[0][2]
 
             return (
-                f"I don't have a reliable local "
-                f"definition of '{topic}' yet."
+                f"I don't have a reliable local definition "
+                f"of '{topic}' yet."
             )
 
         if intent == "compare":
@@ -1593,74 +1621,56 @@ class LocalReasoner:
                 limit=1
             )
 
-            if not first_info and not second_info:
-                return (
-                    "I don't have enough local information "
-                    "to make a factual comparison."
-                )
-
             response = [
                 "Comparison:",
                 "",
                 f"{first}:",
-            ]
-
-            if first_info:
-                response.append(
+                (
                     first_info[0][2]
-                )
-            else:
-                response.append(
-                    "No matching local knowledge."
-                )
-
-            response.extend([
+                    if first_info
+                    else "No matching local knowledge."
+                ),
                 "",
                 f"{second}:",
-            ])
-
-            if second_info:
-                response.append(
+                (
                     second_info[0][2]
-                )
-            else:
-                response.append(
-                    "No matching local knowledge."
-                )
+                    if second_info
+                    else "No matching local knowledge."
+                ),
+            ]
 
             return "\n".join(response)
 
         # ----------------------------------------------------
-        # GENERAL LOCAL REASONING
+        # RETRIEVAL-FIRST REASONING
         # ----------------------------------------------------
 
-        memory_results = MemoryEngine.search(
-            text,
-            limit=3
-        )
+        retrieved = ReasoningEngine.retrieve(text)
 
-        knowledge_results = KnowledgeEngine.search(
-            text,
-            limit=3
-        )
+        knowledge_results = retrieved["knowledge"]
+        memory_results = retrieved["memories"]
 
         if knowledge_results:
+
             best = knowledge_results[0]
 
-            # Only use a result when there is actual overlap.
-            if best[0] >= 1:
+            if best[0] >= 1.5:
                 return best[2]
 
         if memory_results:
+
             return (
                 "I found something relevant in memory:\n\n"
                 + "\n".join(
                     "• " + item
-                    for item in memory_results
+                    for item in memory_results[:3]
                 )
             )
 
-        # Natural arithmetic.
+        # ----------------------------------------------------
+        # NATURAL MATH
+        # ----------------------------------------------------
+
         possible_math = re.sub(
             r"[^0-9+\-*/().% ]",
             "",
@@ -1675,6 +1685,7 @@ class LocalReasoner:
             )
             and len(possible_math) <= 100
         ):
+
             result = Calculator.calculate(
                 possible_math
             )
@@ -1682,88 +1693,48 @@ class LocalReasoner:
             if result is not None:
                 return f"The answer is {result}."
 
-        # Basic factual question.
-        match = re.match(
-            r"what\s+is\s+(.+?)[?]?$",
-            text,
-            re.IGNORECASE
-        )
+        # ----------------------------------------------------
+        # SIMPLE TASK PLANNING
+        # ----------------------------------------------------
 
-        if match:
-
-            subject = match.group(1).strip()
-
-            results = KnowledgeEngine.search(
-                subject,
-                limit=1
-            )
-
-            if results:
-                return results[0][2]
-
-            return (
-                f"I don't have enough reliable local "
-                f"knowledge about '{subject}' yet."
-            )
-
-        # Context-aware fallback.
-        recent = ContextEngine.recent(
-            limit=4
-        )
-
-        if recent:
-
-            previous_user = [
-                item["content"]
-                for item in recent
-                if item["role"] == "user"
-            ]
-
-            if previous_user:
-                return (
-                    "I'm following you, but I don't have "
-                    "enough local knowledge to give you a "
-                    "reliable answer yet.\n\n"
-                    "You can teach me with:\n"
-                    "teach Nexora topic = information"
+        if (
+            text.lower().startswith(
+                (
+                    "how do i ",
+                    "how can i ",
+                    "how should i ",
                 )
+            )
+        ):
+
+            steps = ReasoningEngine.plan(text)
+
+            return (
+                "I can structure that locally as:\n\n"
+                + "\n".join(
+                    f"{i}. {step}"
+                    for i, step
+                    in enumerate(steps, 1)
+                )
+                + "\n\n"
+                "I don't have enough external knowledge "
+                "to fill in unsupported factual details."
+            )
+
+        # ----------------------------------------------------
+        # UNKNOWN
+        # ----------------------------------------------------
 
         return (
-            "I'm following you. I don't have enough "
-            "reliable local knowledge to answer that yet. "
-            "You can teach me information with:\n\n"
+            "I'm following you, but I don't have enough "
+            "reliable local knowledge to answer that yet.\n\n"
+            "You can teach me using:\n"
             "teach Nexora topic = information"
-        )
-
-    @staticmethod
-    def explain(topic: str) -> str:
-
-        if not topic:
-            return (
-                "Tell me what you'd like me to explain."
-            )
-
-        results = KnowledgeEngine.search(
-            topic,
-            limit=1
-        )
-
-        if results:
-            return (
-                "Here's what I know:\n\n"
-                + results[0][2]
-            )
-
-        return (
-            f"I don't have enough reliable local "
-            f"knowledge to explain '{topic}' yet.\n\n"
-            f"You can teach me using:\n"
-            f"teach Nexora {topic} = information"
         )
 
 
 # ============================================================
-# OUTPUT PROCESSING
+# OUTPUT
 # ============================================================
 
 def apply_style(response: str) -> str:
@@ -1801,54 +1772,49 @@ def apply_style(response: str) -> str:
 
 def validate_output(response: str) -> str:
 
-    if not isinstance(
-        response,
-        str
-    ):
-        raise ValueError()
+    if not isinstance(response, str):
+        raise ValueError("invalid output")
 
     response = response.strip()
 
     if not response:
-        raise ValueError()
+        raise ValueError("empty output")
 
     if len(response) > MAX_OUTPUT:
-        raise ValueError()
+        raise ValueError("output too long")
 
     if contains_secret(response):
         security_event(
             "secret_output_blocked",
             "CRITICAL"
         )
-        raise ValueError()
+        raise ValueError("secret output")
 
-    allowed, category = safety_check(
-        response
-    )
+    allowed, category = safety_check(response)
 
     if not allowed:
         security_event(
             "unsafe_output_blocked",
             "CRITICAL"
         )
-        raise ValueError()
+        raise ValueError(
+            f"unsafe output: {category}"
+        )
 
     return response
 
 
 # ============================================================
-# MAIN PIPELINE
+# PIPELINE
 # ============================================================
 
 def process(
     message: str,
-    client_id: str
+    client_id: str,
+    source: str = "web"
 ) -> str:
 
-    if not isinstance(
-        message,
-        str
-    ):
+    if not isinstance(message, str):
         return "Invalid message."
 
     message = message.strip()
@@ -1863,17 +1829,25 @@ def process(
         )
 
     if is_locked():
-        return (
-            "Nexora is currently in security lockdown."
-        )
+        return "Nexora is currently in security lockdown."
 
-    if not rate_limit(client_id):
+    limit = (
+        API_RATE_LIMIT
+        if source == "api"
+        else WEB_RATE_LIMIT
+    )
+
+    if not rate_limit(
+        f"{source}:{client_id}",
+        limit
+    ):
         return (
             "Rate limit reached. Please wait a moment "
             "before sending another request."
         )
 
     if contains_secret(message):
+
         security_event(
             "secret_input_blocked",
             "WARN"
@@ -1885,42 +1859,34 @@ def process(
             "in chat."
         )
 
-    allowed, category = safety_check(
-        message
-    )
+    allowed, category = safety_check(message)
 
     if not allowed:
+
         security_event(
             "unsafe_request",
             "WARN"
         )
 
-        return safety_response(
-            category
-        )
+        return safety_response(category)
 
     try:
+
         ContextEngine.add(
             "user",
             message
         )
 
-        intent = IntentEngine.detect(
-            message
-        )
+        intent = IntentEngine.detect(message)
 
-        response = LocalReasoner.answer(
+        response = ReasoningEngine.answer(
             message,
             intent
         )
 
-        response = apply_style(
-            response
-        )
+        response = apply_style(response)
 
-        response = validate_output(
-            response
-        )
+        response = validate_output(response)
 
         ContextEngine.add(
             "assistant",
@@ -1948,18 +1914,23 @@ def process(
 
 
 # ============================================================
-# HTML INTERFACE
+# WEB UI
 # ============================================================
 
 HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
 
-<title>Nexora</title>
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>Nexora v11</title>
 
 <style>
 
@@ -1970,6 +1941,7 @@ HTML = r"""
 body {
     margin: 0;
     min-height: 100vh;
+
     color: white;
 
     font-family:
@@ -2100,7 +2072,6 @@ body {
 
 input {
     flex: 1;
-
     min-width: 0;
 
     padding: 16px;
@@ -2148,6 +2119,7 @@ button:disabled {
 }
 
 </style>
+
 </head>
 
 <body>
@@ -2165,7 +2137,7 @@ INTELLIGENCE. SECURED.
 </div>
 
 <div class="status">
-v10.1 • Local Reasoning • Memory • Knowledge • Security
+v11.0 • Local Reasoning • Memory • Knowledge • Security
 </div>
 
 </div>
@@ -2178,7 +2150,7 @@ v10.1 • Local Reasoning • Memory • Knowledge • Security
 NEXORA
 </span>
 
-Hey! I'm Nexora. What are we working on?
+Hey! I'm Nexora v11. What are we working on?
 
 </div>
 
@@ -2258,6 +2230,7 @@ function addMessage(
         chat.scrollHeight;
 }
 
+
 form.addEventListener(
     "submit",
     async function(event) {
@@ -2284,7 +2257,7 @@ form.addEventListener(
 
             const response =
                 await fetch(
-                    "/api/chat",
+                    "/api/web-chat",
                     {
                         method: "POST",
 
@@ -2302,7 +2275,8 @@ form.addEventListener(
             let data;
 
             try {
-                data = await response.json();
+                data =
+                    await response.json();
             } catch {
                 data = {};
             }
@@ -2347,6 +2321,7 @@ input.focus();
 </script>
 
 </body>
+
 </html>
 """
 
@@ -2355,11 +2330,9 @@ input.focus();
 # HTTP SERVER
 # ============================================================
 
-class NexoraServer(
-    BaseHTTPRequestHandler
-):
+class NexoraServer(BaseHTTPRequestHandler):
 
-    server_version = "NexoraHTTP/10.1"
+    server_version = "NexoraHTTP/11.0"
 
     def send_json(
         self,
@@ -2372,9 +2345,7 @@ class NexoraServer(
             ensure_ascii=False
         ).encode("utf-8")
 
-        self.send_response(
-            status
-        )
+        self.send_response(status)
 
         self.send_header(
             "Content-Type",
@@ -2403,26 +2374,20 @@ class NexoraServer(
     def authorized(self) -> bool:
 
         provided = (
-            self.headers.get(
-                "X-API-Key"
-            )
-            or self.headers.get(
-                "Authorization"
-            )
+            self.headers.get("X-API-Key")
+            or self.headers.get("Authorization")
         )
 
-        if provided and provided.startswith(
-            "Bearer "
-        ):
+        if provided and provided.startswith("Bearer "):
             provided = provided[7:].strip()
 
-        if not valid_api_key(
-            provided
-        ):
+        if not valid_api_key(provided):
+
             security_event(
                 "authentication_failed",
                 "WARN"
             )
+
             return False
 
         return True
@@ -2435,13 +2400,9 @@ class NexoraServer(
 
         if path == "/":
 
-            body = HTML.encode(
-                "utf-8"
-            )
+            body = HTML.encode("utf-8")
 
-            self.send_response(
-                200
-            )
+            self.send_response(200)
 
             self.send_header(
                 "Content-Type",
@@ -2476,6 +2437,8 @@ class NexoraServer(
                 "memory": True,
                 "knowledge": True,
                 "context": True,
+                "reasoning": True,
+                "planning": True,
                 "calculator": True,
                 "safety": True,
                 "security": True,
@@ -2499,13 +2462,12 @@ class NexoraServer(
                 return
 
             with LOCK:
+
                 events = list(
                     security_events
                 )[-50:]
 
-                current_state = (
-                    security_state
-                )
+                current_state = security_state
 
             self.send_json({
                 "state": current_state,
@@ -2527,7 +2489,10 @@ class NexoraServer(
             self.path
         ).path
 
-        if path != "/api/chat":
+        if path not in (
+            "/api/chat",
+            "/api/web-chat",
+        ):
 
             self.send_json(
                 {"error": "Not found"},
@@ -2536,18 +2501,30 @@ class NexoraServer(
 
             return
 
-        if not self.authorized():
+        # External API:
+        # API key REQUIRED.
+        if path == "/api/chat":
 
-            self.send_json(
-                {
-                    "error":
-                    "Authentication required. "
-                    "Provide X-API-Key."
-                },
-                401
-            )
+            if not self.authorized():
 
-            return
+                self.send_json(
+                    {
+                        "error":
+                        "Authentication required. "
+                        "Provide X-API-Key."
+                    },
+                    401
+                )
+
+                return
+
+            source = "api"
+
+        # Built-in browser:
+        # No API key exposed to JavaScript.
+        else:
+
+            source = "web"
 
         try:
 
@@ -2561,7 +2538,10 @@ class NexoraServer(
         except ValueError:
 
             self.send_json(
-                {"error": "Invalid Content-Length."},
+                {
+                    "error":
+                    "Invalid Content-Length."
+                },
                 400
             )
 
@@ -2598,26 +2578,21 @@ class NexoraServer(
 
             return
 
-        if not isinstance(
-            data,
-            dict
-        ):
+        if not isinstance(data, dict):
 
             self.send_json(
-                {"error": "JSON object required."},
+                {
+                    "error":
+                    "JSON object required."
+                },
                 400
             )
 
             return
 
-        message = data.get(
-            "message"
-        )
+        message = data.get("message")
 
-        if not isinstance(
-            message,
-            str
-        ):
+        if not isinstance(message, str):
 
             self.send_json(
                 {
@@ -2629,13 +2604,12 @@ class NexoraServer(
 
             return
 
-        client_id = (
-            self.client_address[0]
-        )
+        client_id = self.client_address[0]
 
         reply = process(
             message,
-            client_id
+            client_id,
+            source
         )
 
         self.send_json({
@@ -2647,7 +2621,6 @@ class NexoraServer(
         format_string,
         *args
     ):
-        # Deliberately suppress chat/request logging.
         return
 
 
@@ -2661,23 +2634,29 @@ def startup():
 
     print("=" * 60)
     print("NEXORA")
-    print("Intelligence. Secured.")
+    print(SLOGAN)
     print("=" * 60)
+
     print(f"Version: {VERSION}")
     print(f"Host: {HOST}")
     print(f"Port: {PORT}")
+
     print(
         "API authentication:",
         "ENABLED" if API_KEY else "DISABLED"
     )
+
+    print("Browser endpoint: ENABLED")
     print("Persistent memory: ENABLED")
     print("Knowledge engine: ENABLED")
     print("Context engine: ENABLED")
     print("Intent engine: ENABLED")
     print("Reasoning engine: ENABLED")
+    print("Planning engine: ENABLED")
     print("Calculator: ENABLED")
     print("Security monitoring: ENABLED")
     print("External model: DISABLED")
+
     print("=" * 60)
 
     server = ThreadingHTTPServer(
@@ -2686,14 +2665,19 @@ def startup():
     )
 
     try:
+
         server.serve_forever()
 
     except KeyboardInterrupt:
+
         print("Nexora shutting down.")
 
     finally:
+
         server.server_close()
 
 
 if __name__ == "__main__":
     startup()
+
+
