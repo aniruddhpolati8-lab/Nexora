@@ -1,1117 +1,820 @@
-import ast
-import json
-import os
-import random
+# ============================================================
+# NEXORA SECURITY CORE
+# Defence in Depth + Fail Closed
+# ============================================================
+
 import re
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
-
-HOST = "0.0.0.0"
-PORT = int(os.environ.get("PORT", "8000"))
-
-# ============================================================
-# NEXORA
-# ============================================================
-
-NAME = "Nexora"
-SLOGAN = "Intelligence. Secured."
-
-# ============================================================
-# CONVERSATION MEMORY
-# ============================================================
-
-MAX_MEMORY = 30
-memory = []
+import time
+import hashlib
+import secrets
+import threading
+from collections import defaultdict, deque
 
 
-def remember(role, text):
-    memory.append({
-        "role": role,
-        "text": text
+# ------------------------------------------------------------
+# SECURITY STATE
+# ------------------------------------------------------------
+
+class SecurityState:
+
+    NORMAL = "normal"
+    LOCKDOWN = "lockdown"
+    EMERGENCY = "emergency"
+
+
+security_state = SecurityState.NORMAL
+
+security_lock = threading.RLock()
+
+
+# ------------------------------------------------------------
+# SECURITY EVENTS
+# ------------------------------------------------------------
+
+security_events = deque(maxlen=500)
+
+
+def security_event(name, severity="INFO"):
+
+    # NEVER put passwords, API keys, messages,
+    # or private user information in these logs.
+
+    security_events.append({
+        "event": name,
+        "severity": severity,
+        "time": time.time()
     })
 
-    if len(memory) > MAX_MEMORY:
-        del memory[0]
 
+# ------------------------------------------------------------
+# FAIL-CLOSED EXCEPTION
+# ------------------------------------------------------------
 
-def recent_memory():
-    return memory[-MAX_MEMORY:]
-
-
-# ============================================================
-# KNOWLEDGE BASE
-# ============================================================
-
-KNOWLEDGE = {
-    "name": "Nexora",
-    "slogan": SLOGAN,
-    "description": (
-        "Nexora is a coded AI assistant designed to be "
-        "helpful, useful and safety-conscious."
-    ),
-    "version": "2.0",
-    "creator": "Nexora's creator",
-}
-
-
-# ============================================================
-# SAFETY SYSTEM
-# ============================================================
-
-BLOCKED_PATTERNS = [
-    r"\bhow to make a bomb\b",
-    r"\bhow to make an explosive\b",
-    r"\bhow to poison someone\b",
-    r"\bhow to hurt someone\b",
-]
-
-
-def safety_check(text):
-    lowered = text.lower()
-
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, lowered):
-            return False
-
-    return True
-
-
-# ============================================================
-# INTENT SYSTEM
-# ============================================================
-
-def detect_intent(text):
-    t = text.lower().strip()
-
-    if not t:
-        return "empty"
-
-    if any(x in t for x in [
-        "hello",
-        "hi",
-        "hey",
-        "hiya",
-        "good morning",
-        "good afternoon",
-        "good evening"
-    ]):
-        return "greeting"
-
-    if any(x in t for x in [
-        "bye",
-        "goodbye",
-        "see you",
-        "see ya"
-    ]):
-        return "goodbye"
-
-    if any(x in t for x in [
-        "who are you",
-        "what are you",
-        "what is nexora"
-    ]):
-        return "identity"
-
-    if any(x in t for x in [
-        "what can you do",
-        "help me",
-        "help",
-        "capabilities"
-    ]):
-        return "help"
-
-    if any(x in t for x in [
-        "what time",
-        "current time",
-        "time is it"
-    ]):
-        return "time"
-
-    if any(x in t for x in [
-        "what date",
-        "today's date",
-        "what day"
-    ]):
-        return "date"
-
-    if t.startswith("calculate "):
-        return "calculate"
-
-    if t.startswith("calc "):
-        return "calculate"
-
-    if t.startswith("remember "):
-        return "remember"
-
-    if t in ["forget", "forget everything", "clear memory"]:
-        return "forget"
-
-    if "?" in t:
-        return "question"
-
-    question_words = (
-        "what ",
-        "why ",
-        "when ",
-        "where ",
-        "who ",
-        "how ",
-        "can ",
-        "could ",
-        "would ",
-        "is ",
-        "are ",
-        "do ",
-        "does "
-    )
-
-    if t.startswith(question_words):
-        return "question"
-
-    return "conversation"
-
-
-# ============================================================
-# KNOWLEDGE SYSTEM
-# ============================================================
-
-def knowledge_lookup(text):
-    t = text.lower()
-
-    if "your name" in t:
-        return f"My name is {NAME}."
-
-    if "slogan" in t:
-        return f"My slogan is: {SLOGAN}"
-
-    if "version" in t:
-        return f"I'm running Nexora version {KNOWLEDGE['version']}."
-
-    if "who created you" in t or "who made you" in t:
-        return f"I was created by {KNOWLEDGE['creator']}."
-
-    if "what is nexora" in t:
-        return KNOWLEDGE["description"]
-
-    return None
-
-
-# ============================================================
-# SAFE CALCULATOR
-# ============================================================
-
-ALLOWED_OPERATORS = {
-    ast.Add: lambda a, b: a + b,
-    ast.Sub: lambda a, b: a - b,
-    ast.Mult: lambda a, b: a * b,
-    ast.Div: lambda a, b: a / b,
-    ast.Mod: lambda a, b: a % b,
-    ast.Pow: lambda a, b: a ** b,
-}
-
-
-def safe_calculate(expression):
-    expression = expression.strip()
-
-    if len(expression) > 100:
-        return None
-
-    try:
-        tree = ast.parse(
-            expression,
-            mode="eval"
-        )
-
-        def evaluate(node):
-
-            if isinstance(node, ast.Expression):
-                return evaluate(node.body)
-
-            if isinstance(node, ast.Constant):
-                if isinstance(node.value, (int, float)):
-                    return node.value
-                raise ValueError()
-
-            if isinstance(node, ast.BinOp):
-                operator = ALLOWED_OPERATORS.get(
-                    type(node.op)
-                )
-
-                if operator is None:
-                    raise ValueError()
-
-                left = evaluate(node.left)
-                right = evaluate(node.right)
-
-                return operator(left, right)
-
-            if isinstance(node, ast.UnaryOp):
-                value = evaluate(node.operand)
-
-                if isinstance(node.op, ast.USub):
-                    return -value
-
-                if isinstance(node.op, ast.UAdd):
-                    return value
-
-            raise ValueError()
-
-        result = evaluate(tree)
-
-        if isinstance(result, float):
-            return round(result, 10)
-
-        return result
-
-    except Exception:
-        return None
-
-
-# ============================================================
-# RESPONSE GENERATOR
-# ============================================================
-
-def generate_response(message, intent):
-
-    text = message.strip()
-
-    # Knowledge comes first
-    answer = knowledge_lookup(text)
-
-    if answer:
-        return answer
-
-    # Greeting
-    if intent == "greeting":
-
-        return random.choice([
-            "Hello! Nexora is online. What can I help you with?",
-            "Hey! I'm Nexora. What are we working on today?",
-            "Hello! I'm ready when you are.",
-            "Hi! What would you like to explore?"
-        ])
-
-    # Goodbye
-    if intent == "goodbye":
-
-        return random.choice([
-            "Goodbye! I'll be here when you return.",
-            "See you later!",
-            "Take care!",
-            "Nexora signing off."
-        ])
-
-    # Identity
-    if intent == "identity":
-
-        return (
-            "I'm Nexora — a coded AI assistant. "
-            "My current brain uses memory, intent detection, "
-            "knowledge, tools, response generation and safety checks."
-        )
-
-    # Help
-    if intent == "help":
-
-        return (
-            "I can remember our current conversation, "
-            "recognise different types of requests, "
-            "answer questions from my knowledge base, "
-            "perform calculations and handle several commands."
-        )
-
-    # Time
-    if intent == "time":
-
-        now = datetime.now()
-
-        return (
-            "The current server time is "
-            + now.strftime("%H:%M:%S")
-            + "."
-        )
-
-    # Date
-    if intent == "date":
-
-        now = datetime.now()
-
-        return (
-            "Today's date is "
-            + now.strftime("%A, %d %B %Y")
-            + "."
-        )
-
-    # Calculator
-    if intent == "calculate":
-
-        expression = re.sub(
-            r"^(calculate|calc)\s+",
-            "",
-            text,
-            flags=re.IGNORECASE
-        )
-
-        result = safe_calculate(expression)
-
-        if result is None:
-            return (
-                "I couldn't safely calculate that. "
-                "Try something like: calculate 25 * 4"
-            )
-
-        return f"The answer is {result}."
-
-    # Remember
-    if intent == "remember":
-
-        information = re.sub(
-            r"^remember\s+",
-            "",
-            text,
-            flags=re.IGNORECASE
-        ).strip()
-
-        if not information:
-            return "Tell me what you'd like me to remember."
-
-        remember(
-            "memory",
-            information
-        )
-
-        return (
-            "I'll keep that in the current conversation."
-        )
-
-    # Forget
-    if intent == "forget":
-
-        memory.clear()
-
-        return (
-            "Current conversation memory cleared."
-        )
-
-    # Question
-    if intent == "question":
-
-        return random.choice([
-            "That's a good question. I don't have enough information in my current knowledge base to answer it yet.",
-            "I understand the question, but my current knowledge system doesn't contain that information yet.",
-            "I'd need more knowledge to give you a reliable answer to that.",
-        ])
-
-    # General conversation
-    return random.choice([
-        "Interesting. Tell me more.",
-        "I'm following you. What should we look at next?",
-        "Got it. What would you like to do with that?",
-        "I understand. Keep going.",
-        "That makes sense.",
-    ])
-
-
-# ============================================================
-# AI MODEL CONNECTOR
-# ============================================================
-
-def ai_model(message, history):
-
+class SafetyFailure(Exception):
     """
-    This is the future model connection point.
+    A safety subsystem failed.
 
-    For now, Nexora's coded brain handles the response.
-
-    Later, a real pretrained language model can replace
-    this function without rebuilding the whole website.
+    IMPORTANT:
+    The correct behaviour is to STOP the request.
     """
 
-    intent = detect_intent(message)
-
-    return generate_response(
-        message,
-        intent
-    )
+    pass
 
 
-# ============================================================
-# NEXORA BRAIN
-# ============================================================
+# ------------------------------------------------------------
+# 1. INPUT VALIDATION
+# ------------------------------------------------------------
 
-def process_message(message):
+MAX_MESSAGE_LENGTH = 4000
+
+
+def validate_input(message):
+
+    if not isinstance(message, str):
+
+        security_event(
+            "invalid_input_type",
+            "WARN"
+        )
+
+        raise SafetyFailure()
 
     message = message.strip()
 
     if not message:
-        return "Please type a message."
 
-    # Input safety
-    if not safety_check(message):
-
-        return (
-            "I can't help with dangerous instructions. "
-            "Let's try something safer."
+        security_event(
+            "empty_input",
+            "WARN"
         )
 
-    # Remember user message
-    remember(
-        "user",
-        message
-    )
+        raise SafetyFailure()
 
-    # Generate response
-    response = ai_model(
-        message,
-        recent_memory()
-    )
+    if len(message) > MAX_MESSAGE_LENGTH:
 
-    # Output safety
-    if not safety_check(response):
-
-        response = (
-            "I can't provide that response."
+        security_event(
+            "input_too_large",
+            "WARN"
         )
 
-    # Remember Nexora response
-    remember(
-        "nexora",
+        raise SafetyFailure()
+
+    return message
+
+
+# ------------------------------------------------------------
+# 2. RATE LIMITING
+# ------------------------------------------------------------
+
+RATE_WINDOW = 60
+MAX_REQUESTS = 30
+
+rate_history = defaultdict(deque)
+
+
+def rate_limit(client_id):
+
+    now = time.time()
+
+    history = rate_history[
+        client_id
+    ]
+
+    while history:
+
+        if now - history[0] <= RATE_WINDOW:
+            break
+
+        history.popleft()
+
+    if len(history) >= MAX_REQUESTS:
+
+        security_event(
+            "rate_limit_triggered",
+            "WARN"
+        )
+
+        raise SafetyFailure()
+
+    history.append(now)
+
+
+# ------------------------------------------------------------
+# 3. PRIVACY / SECRET DETECTION
+# ------------------------------------------------------------
+
+SECRET_PATTERNS = [
+
+    r"sk-[A-Za-z0-9_-]{20,}",
+
+    r"AIza[A-Za-z0-9_-]{20,}",
+
+    r"(?i)\bpassword\s*[:=]\s*\S+",
+
+    r"(?i)\bapi[_-]?key\s*[:=]\s*\S+",
+
+    r"(?i)\bsecret\s*[:=]\s*\S+",
+
+    r"(?i)\btoken\s*[:=]\s*\S+",
+
+]
+
+
+def privacy_check(message):
+
+    for pattern in SECRET_PATTERNS:
+
+        if re.search(
+            pattern,
+            message
+        ):
+
+            security_event(
+                "possible_secret_detected",
+                "WARN"
+            )
+
+            raise SafetyFailure()
+
+    return True
+
+
+# ------------------------------------------------------------
+# 4. INPUT SAFETY
+# ------------------------------------------------------------
+
+DANGEROUS_PATTERNS = [
+
+    r"\bhow\s+to\s+kill\b",
+
+    r"\bhow\s+to\s+hurt\s+someone\b",
+
+    r"\bhow\s+to\s+poison\s+someone\b",
+
+    r"\bhow\s+to\s+make\s+a\s+bomb\b",
+
+    r"\bhow\s+to\s+build\s+a\s+bomb\b",
+
+    r"\bhow\s+to\s+make\s+an\s+explosive\b",
+
+    r"\bhow\s+to\s+build\s+an\s+explosive\b",
+
+    r"\bhow\s+to\s+make\s+a\s+weapon\b",
+
+    r"\bhow\s+to\s+build\s+a\s+weapon\b",
+
+]
+
+
+RISKY_BEHAVIOUR_PATTERNS = [
+
+    r"\bdeadly\s+challenge\b",
+
+    r"\bdangerous\s+challenge\b",
+
+    r"\bchoking\s+challenge\b",
+
+    r"\bhow\s+to\s+get\s+high\b",
+
+    r"\bhow\s+to\s+starve\b",
+
+    r"\bhow\s+to\s+purge\b",
+
+    r"\bexercise\s+until\s+i\s+collapse\b",
+
+]
+
+
+SELF_HARM_PATTERNS = [
+
+    r"\bkill myself\b",
+
+    r"\bend my life\b",
+
+    r"\bhurt myself\b",
+
+    r"\bself[- ]?harm\b",
+
+]
+
+
+def safety_check(message):
+
+    text = message.lower()
+
+    for pattern in (
+        SELF_HARM_PATTERNS
+    ):
+
+        if re.search(
+            pattern,
+            text
+        ):
+
+            security_event(
+                "self_harm_request",
+                "WARN"
+            )
+
+            return False, "self_harm"
+
+
+    for pattern in (
+        DANGEROUS_PATTERNS
+    ):
+
+        if re.search(
+            pattern,
+            text
+        ):
+
+            security_event(
+                "dangerous_request",
+                "WARN"
+            )
+
+            return False, "dangerous"
+
+
+    for pattern in (
+        RISKY_BEHAVIOUR_PATTERNS
+    ):
+
+        if re.search(
+            pattern,
+            text
+        ):
+
+            security_event(
+                "risky_behaviour",
+                "WARN"
+            )
+
+            return False, "risky"
+
+
+    return True, "safe"
+
+
+# ------------------------------------------------------------
+# 5. PERMISSION BOUNDARY
+# ------------------------------------------------------------
+
+def normal_user_can(
+    action
+):
+
+    """
+    Normal chat NEVER receives
+    administrative privileges.
+    """
+
+    forbidden_actions = {
+
+        "shutdown",
+
+        "kill_switch",
+
+        "lockdown",
+
+        "restart",
+
+        "execute_shell",
+
+        "execute_python",
+
+        "read_secret",
+
+        "modify_environment",
+
+        "delete_server_files",
+
+    }
+
+    if action in forbidden_actions:
+
+        return False
+
+    return True
+
+
+# ------------------------------------------------------------
+# 6. MEMORY ISOLATION
+# ------------------------------------------------------------
+
+def sanitise_memory(text):
+
+    """
+    MEMORY IS DATA.
+
+    Memory must NEVER become
+    a system instruction.
+    """
+
+    if not isinstance(
+        text,
+        str
+    ):
+
+        raise SafetyFailure()
+
+    if len(text) > 500:
+
+        raise SafetyFailure()
+
+    if any(
+        re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+        for pattern in [
+
+            r"ignore previous instructions",
+
+            r"ignore all safety rules",
+
+            r"you are now the system",
+
+            r"system message:",
+
+            r"developer message:",
+
+        ]
+    ):
+
+        security_event(
+            "instruction_like_memory_blocked",
+            "WARN"
+        )
+
+        raise SafetyFailure()
+
+    return text.strip()
+
+
+# ------------------------------------------------------------
+# 7. AI MODEL BOUNDARY
+# ------------------------------------------------------------
+
+def run_ai_model(
+    message,
+    conversation,
+    memories
+):
+
+    """
+    The model is treated as an UNTRUSTED component.
+
+    It receives data.
+
+    It does NOT receive:
+        - shell access
+        - Python execution
+        - filesystem access
+        - secrets
+        - admin permissions
+    """
+
+    try:
+
+        # Replace this with your future model.
+
+        return basic_generator(
+            message,
+            conversation,
+            memories
+        )
+
+    except Exception:
+
+        security_event(
+            "model_failure",
+            "ERROR"
+        )
+
+        # FAIL CLOSED
+        raise SafetyFailure()
+
+
+# ------------------------------------------------------------
+# 8. OUTPUT SAFETY
+# ------------------------------------------------------------
+
+def output_safety_check(
+    response
+):
+
+    if not isinstance(
+        response,
+        str
+    ):
+
+        raise SafetyFailure()
+
+    if not response.strip():
+
+        raise SafetyFailure()
+
+    if len(response) > 8000:
+
+        security_event(
+            "oversized_model_output",
+            "WARN"
+        )
+
+        raise SafetyFailure()
+
+    allowed, category = safety_check(
         response
     )
+
+    if not allowed:
+
+        security_event(
+            "unsafe_model_output",
+            "ERROR"
+        )
+
+        raise SafetyFailure()
 
     return response
 
 
-# ============================================================
-# WEB INTERFACE
-# ============================================================
+# ------------------------------------------------------------
+# 9. OUTPUT PRIVACY CHECK
+# ------------------------------------------------------------
 
-HTML = r"""
-<!DOCTYPE html>
+def output_privacy_check(
+    response
+):
 
-<html lang="en">
+    for pattern in SECRET_PATTERNS:
 
-<head>
+        if re.search(
+            pattern,
+            response
+        ):
 
-<meta charset="UTF-8">
+            security_event(
+                "secret_in_model_output",
+                "ERROR"
+            )
 
-<meta name="viewport"
-content="width=device-width, initial-scale=1.0">
+            raise SafetyFailure()
 
-<title>Nexora — Intelligence. Secured.</title>
+    return response
 
-<style>
 
-* {
-    box-sizing: border-box;
-}
+# ------------------------------------------------------------
+# 10. LOCKDOWN
+# ------------------------------------------------------------
 
-body {
+def is_locked():
 
-    margin: 0;
+    with security_lock:
 
-    min-height: 100vh;
+        return security_state in (
 
-    font-family: Arial, sans-serif;
+            SecurityState.LOCKDOWN,
 
-    color: white;
+            SecurityState.EMERGENCY
 
-    background:
-        radial-gradient(
-            circle at 15% 20%,
-            rgba(0,255,255,.22),
-            transparent 30%
-        ),
-        radial-gradient(
-            circle at 85% 20%,
-            rgba(190,0,255,.28),
-            transparent 35%
-        ),
-        linear-gradient(
-            135deg,
-            #05000d,
-            #12001f,
-            #080018
-        );
-}
-
-.app {
-
-    width: min(1000px, 92%);
-
-    min-height: 90vh;
-
-    margin: 5vh auto;
-
-    display: flex;
-
-    flex-direction: column;
-
-}
-
-.header {
-
-    text-align: center;
-
-    padding: 25px;
-
-}
-
-.header h1 {
-
-    margin: 0;
-
-    font-size: 60px;
-
-    background:
-        linear-gradient(
-            90deg,
-            white,
-            #6fffff,
-            #d000ff
-        );
-
-    -webkit-background-clip: text;
-
-    background-clip: text;
-
-    color: transparent;
-
-}
-
-.header p {
-
-    color: #6fffff;
-
-    letter-spacing: 4px;
-
-}
-
-.chat {
-
-    flex: 1;
-
-    min-height: 450px;
-
-    overflow-y: auto;
-
-    padding: 25px;
-
-    border: 1px solid rgba(208,0,255,.45);
-
-    border-radius: 20px;
-
-    background: rgba(10,5,22,.78);
-
-    box-shadow:
-        0 0 40px rgba(208,0,255,.12);
-
-}
-
-.message {
-
-    max-width: 82%;
-
-    margin-bottom: 18px;
-
-    padding: 14px 17px;
-
-    line-height: 1.6;
-
-    border-radius: 15px;
-
-    white-space: pre-wrap;
-
-}
-
-.message.nexora {
-
-    border-left: 3px solid #6fffff;
-
-    background: rgba(20,20,45,.65);
-
-}
-
-.message.user {
-
-    margin-left: auto;
-
-    background:
-        linear-gradient(
-            135deg,
-            #7c00ff,
-            #b000ff
-        );
-
-}
-
-.sender {
-
-    display: block;
-
-    margin-bottom: 5px;
-
-    color: #6fffff;
-
-    font-size: 11px;
-
-    font-weight: bold;
-
-    letter-spacing: 2px;
-
-}
-
-.composer {
-
-    display: flex;
-
-    gap: 10px;
-
-    margin-top: 15px;
-
-}
-
-input {
-
-    flex: 1;
-
-    min-width: 0;
-
-    padding: 16px;
-
-    border: 1px solid #a000ff;
-
-    border-radius: 12px;
-
-    outline: none;
-
-    color: white;
-
-    background: rgba(20,10,35,.9);
-
-}
-
-button {
-
-    padding: 0 25px;
-
-    border: 0;
-
-    border-radius: 12px;
-
-    color: white;
-
-    font-weight: bold;
-
-    background:
-        linear-gradient(
-            135deg,
-            #d000ff,
-            #6c00ff
-        );
-
-    cursor: pointer;
-
-}
-
-button:hover {
-
-    filter: brightness(1.2);
-
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="app">
-
-<div class="header">
-
-<h1>Nexora</h1>
-
-<p>INTELLIGENCE. SECURED.</p>
-
-</div>
-
-<div class="chat" id="chat">
-
-<div class="message nexora">
-
-<span class="sender">NEXORA</span>
-
-Hello. I'm Nexora.
-
-My Brain v2 is online.
-
-</div>
-
-</div>
-
-<form
-class="composer"
-onsubmit="sendMessage(event)"
->
-
-<input
-id="message"
-autocomplete="off"
-placeholder="Ask Nexora anything..."
->
-
-<button type="submit">
-Send
-</button>
-
-</form>
-
-</div>
-
-<script>
-
-function addMessage(sender, text, type) {
-
-    const message =
-        document.createElement("div");
-
-    message.className =
-        "message " + type;
-
-    const senderElement =
-        document.createElement("span");
-
-    senderElement.className =
-        "sender";
-
-    senderElement.textContent =
-        sender;
-
-    message.appendChild(
-        senderElement
-    );
-
-    message.appendChild(
-        document.createTextNode(text)
-    );
-
-    const chat =
-        document.getElementById("chat");
-
-    chat.appendChild(message);
-
-    chat.scrollTop =
-        chat.scrollHeight;
-}
-
-
-async function sendMessage(event) {
-
-    event.preventDefault();
-
-    const input =
-        document.getElementById("message");
-
-    const text =
-        input.value.trim();
-
-    if (!text) {
-        return;
-    }
-
-    addMessage(
-        "YOU",
-        text,
-        "user"
-    );
-
-    input.value = "";
-
-    input.disabled = true;
-
-    try {
-
-        const response =
-            await fetch(
-                "/api/chat",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body:
-                        JSON.stringify({
-                            message: text
-                        })
-                }
-            );
-
-        const data =
-            await response.json();
-
-        addMessage(
-            "NEXORA",
-            data.reply ||
-            "I couldn't generate a response.",
-            "nexora"
-        );
-
-    } catch (error) {
-
-        addMessage(
-            "NEXORA",
-            "I couldn't connect to my backend.",
-            "nexora"
-        );
-
-    } finally {
-
-        input.disabled = false;
-
-        input.focus();
-
-    }
-
-}
-
-</script>
-
-</body>
-
-</html>
-"""
-
-
-# ============================================================
-# HTTP SERVER
-# ============================================================
-
-class NexoraHandler(BaseHTTPRequestHandler):
-
-    def send_bytes(
-        self,
-        body,
-        content_type,
-        status=200
-    ):
-
-        self.send_response(status)
-
-        self.send_header(
-            "Content-Type",
-            content_type
-        )
-
-        self.send_header(
-            "Content-Length",
-            str(len(body))
-        )
-
-        self.send_header(
-            "Cache-Control",
-            "no-store"
-        )
-
-        self.end_headers()
-
-        self.wfile.write(body)
-
-
-    def send_json(
-        self,
-        data,
-        status=200
-    ):
-
-        body = json.dumps(
-            data
-        ).encode("utf-8")
-
-        self.send_bytes(
-            body,
-            "application/json; charset=utf-8",
-            status
         )
 
 
-    def do_GET(self):
+def enter_lockdown():
 
-        path = urlparse(
-            self.path
-        ).path
+    global security_state
 
-        if path == "/":
+    with security_lock:
 
-            self.send_bytes(
-                HTML.encode("utf-8"),
-                "text/html; charset=utf-8"
-            )
+        security_state = (
+            SecurityState.LOCKDOWN
+        )
 
-        elif path == "/health":
-
-            self.send_json({
-                "status": "ok",
-                "agent": NAME,
-                "brain": "v2"
-            })
-
-        else:
-
-            self.send_json(
-                {"error": "Not found"},
-                404
-            )
-
-
-    def do_POST(self):
-
-        path = urlparse(
-            self.path
-        ).path
-
-        if path != "/api/chat":
-
-            self.send_json(
-                {"error": "Not found"},
-                404
-            )
-
-            return
-
-        try:
-
-            length = int(
-                self.headers.get(
-                    "Content-Length",
-                    "0"
-                )
-            )
-
-            if length > 1_000_000:
-
-                self.send_json(
-                    {"error": "Request too large"},
-                    413
-                )
-
-                return
-
-            body = self.rfile.read(
-                length
-            )
-
-            data = json.loads(
-                body.decode("utf-8")
-            )
-
-            message = str(
-                data.get("message", "")
-            ).strip()
-
-            if not message:
-
-                self.send_json(
-                    {"error": "Message cannot be empty"},
-                    400
-                )
-
-                return
-
-            reply = process_message(
-                message
-            )
-
-            self.send_json({
-                "reply": reply
-            })
-
-        except json.JSONDecodeError:
-
-            self.send_json(
-                {"error": "Invalid JSON"},
-                400
-            )
-
-        except Exception as error:
-
-            print(
-                "SERVER ERROR:",
-                error
-            )
-
-            self.send_json(
-                {"error": "Internal server error"},
-                500
-            )
-
-
-    def log_message(
-        self,
-        format_string,
-        *args
-    ):
-
-        return
-
-
-# ============================================================
-# START SERVER
-# ============================================================
-
-def main():
-
-    server = ThreadingHTTPServer(
-        (HOST, PORT),
-        NexoraHandler
+    security_event(
+        "lockdown_enabled",
+        "WARN"
     )
 
-    print(
-        f"{NAME} is running on port {PORT}"
+
+# ------------------------------------------------------------
+# 11. EMERGENCY STATE
+# ------------------------------------------------------------
+
+def emergency_stop():
+
+    global security_state
+
+    with security_lock:
+
+        security_state = (
+            SecurityState.EMERGENCY
+        )
+
+    security_event(
+        "emergency_state_enabled",
+        "CRITICAL"
     )
 
-    print(
-        "Brain v2: ONLINE"
-    )
 
-    print(
-        "Memory: ENABLED"
-    )
+# ------------------------------------------------------------
+# 12. MAIN DEFENCE-IN-DEPTH PIPELINE
+# ------------------------------------------------------------
 
-    print(
-        "Intent system: ENABLED"
-    )
-
-    print(
-        "Knowledge system: ENABLED"
-    )
-
-    print(
-        "Calculator: ENABLED"
-    )
-
-    print(
-        "Safety system: ENABLED"
-    )
+def secure_process(
+    message,
+    client_id,
+    conversation,
+    memories
+):
 
     try:
 
-        server.serve_forever()
+        # ==============================
+        # LAYER 1
+        # ==============================
 
-    except KeyboardInterrupt:
-
-        print(
-            "\nNexora stopped."
+        message = validate_input(
+            message
         )
 
-    finally:
 
-        server.server_close()
+        # ==============================
+        # LAYER 2
+        # ==============================
+
+        rate_limit(
+            client_id
+        )
 
 
-if __name__ == "__main__":
-    main()
+        # ==============================
+        # LAYER 3
+        # ==============================
+
+        privacy_check(
+            message
+        )
+
+
+        # ==============================
+        # LAYER 4
+        # ==============================
+
+        if is_locked():
+
+            return (
+                "Nexora is currently "
+                "in lockdown mode."
+            )
+
+
+        # ==============================
+        # LAYER 5
+        # ==============================
+
+        allowed, category = (
+            safety_check(
+                message
+            )
+        )
+
+        if not allowed:
+
+            if category == "self_harm":
+
+                return (
+                    "I can't help with "
+                    "instructions for hurting "
+                    "yourself. Please tell a "
+                    "trusted adult or another "
+                    "person who can support you."
+                )
+
+            if category == "dangerous":
+
+                return (
+                    "I can't provide instructions "
+                    "for seriously harming people "
+                    "or creating dangerous weapons "
+                    "or substances."
+                )
+
+            if category == "risky":
+
+                return (
+                    "I can't encourage dangerous "
+                    "habits or challenges."
+                )
+
+            return (
+                "I can't safely help with that."
+            )
+
+
+        # ==============================
+        # LAYER 6
+        # ==============================
+
+        safe_memories = []
+
+        for memory in memories:
+
+            try:
+
+                safe_memories.append(
+                    sanitise_memory(
+                        memory
+                    )
+                )
+
+            except SafetyFailure:
+
+                # Bad memory is discarded.
+                # The whole model doesn't need
+                # to receive it.
+
+                continue
+
+
+        # ==============================
+        # LAYER 7
+        # ==============================
+
+        response = run_ai_model(
+            message,
+            conversation,
+            safe_memories
+        )
+
+
+        # ==============================
+        # LAYER 8
+        # ==============================
+
+        response = output_safety_check(
+            response
+        )
+
+
+        # ==============================
+        # LAYER 9
+        # ==============================
+
+        response = output_privacy_check(
+            response
+        )
+
+
+        # ==============================
+        # SUCCESS
+        # ==============================
+
+        return response
+
+
+    except SafetyFailure:
+
+        # =================================
+        # FAIL CLOSED
+        # =================================
+
+        security_event(
+            "request_failed_closed",
+            "WARN"
+        )
+
+        return (
+            "Nexora couldn't safely "
+            "complete that request."
+        )
+
+
+    except Exception:
+
+        # =================================
+        # UNKNOWN FAILURE
+        # =================================
+        #
+        # NEVER continue after an unknown
+        # security-related failure.
+        #
+
+        security_event(
+            "unknown_security_failure",
+            "CRITICAL"
+        )
+
+        return (
+            "Nexora encountered a problem "
+            "and stopped safely."
+        )
+
+
+# ------------------------------------------------------------
+# BASIC GENERATOR
+# ------------------------------------------------------------
+
+def basic_generator(
+    message,
+    conversation,
+    memories
+):
+
+    text = message.lower().strip()
+
+
+    if text in [
+        "hi",
+        "hello",
+        "hey"
+    ]:
+
+        return (
+            "Hey! I'm Nexora. "
+            "What are we working on?"
+        )
+
+
+    if "slogan" in text:
+
+        return (
+            "My slogan is: "
+            "Intelligence. Secured."
+        )
+
+
+    if "remember" in text:
+
+        return (
+            "I can remember information "
+            "that you explicitly ask me "
+            "to save."
+        )
+
+
+    if "what do you remember" in text:
+
+        if not memories:
+
+            return (
+                "I don't have any saved "
+                "memories yet."
+            )
+
+        return (
+            "I remember:\n"
+            + "\n".join(
+                "• " + m
+                for m in memories
+            )
+        )
+
+
+    return (
+        "I'm Nexora. I understand your "
+        "message, but my current AI "
+        "generator is still being developed."
+    )
