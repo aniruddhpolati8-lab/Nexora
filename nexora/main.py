@@ -2268,7 +2268,7 @@ def main():
 
 if __name__ == "__main__":
 
-    from __future__ import annotations
+
 
 import ast
 import json
@@ -4537,4 +4537,4 @@ def main():
 
 
 if __name__ == "__main__":
-   startup()
+    startup()
