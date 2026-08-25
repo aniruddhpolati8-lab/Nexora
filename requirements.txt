@@ -1,1 +1,3 @@
 # Nexora v10 uses Python's standard library only.
+# Nexora v10
+# No external Python packages required.
