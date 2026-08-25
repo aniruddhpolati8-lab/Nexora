@@ -1,6 +1,20 @@
-
+# Python
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+
+# Nexora local data
 nexora_data.json
 nexora_data.json.tmp
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
