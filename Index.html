@@ -1,153 +1,1471 @@
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#0b0d14">
-  <meta name="description" content="Nexora — your intelligent AI agent">
-  <title>Nexora — Your Intelligent AI Agent</title>
+
+  <meta name="theme-color" content="#080a12">
+  <meta
+    name="description"
+    content="Nexora — an intelligent AI workspace for thinking, creating and getting things done."
+  >
+  <meta name="application-name" content="Nexora">
+  <meta name="color-scheme" content="dark">
+
+  <title>Nexora — Intelligent AI Workspace</title>
+
+  <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap"
+    rel="stylesheet"
+  >
+
+  <!-- Nexora styles -->
   <link rel="stylesheet" href="styles.css">
 </head>
+
 <body>
-  <div class="ambient ambient-cyan" aria-hidden="true"></div>
-  <div class="ambient ambient-purple" aria-hidden="true"></div>
+
+  <!-- =========================================================
+       BACKGROUND ATMOSPHERE
+  ========================================================== -->
+
+  <div
+    class="ambient ambient-cyan"
+    aria-hidden="true"
+  ></div>
+
+  <div
+    class="ambient ambient-purple"
+    aria-hidden="true"
+  ></div>
+
+  <div
+    class="ambient ambient-pink"
+    aria-hidden="true"
+  ></div>
+
+  <div
+    class="noise-overlay"
+    aria-hidden="true"
+  ></div>
+
+
+  <!-- Skip navigation -->
+  <a
+    class="skip-link"
+    href="#mainContent"
+  >
+    Skip to content
+  </a>
+
+
+  <!-- =========================================================
+       APPLICATION
+  ========================================================== -->
 
   <div class="app-shell">
-    <aside class="sidebar" id="sidebar" aria-label="Nexora sidebar">
-      <div>
+
+    <!-- =======================================================
+         SIDEBAR
+    ======================================================== -->
+
+    <aside
+      class="sidebar"
+      id="sidebar"
+      aria-label="Nexora navigation"
+    >
+
+      <div class="sidebar-top">
+
+        <!-- Brand -->
         <div class="sidebar-heading">
-          <a href="#" class="brand" aria-label="Nexora home">
-            <span class="brand-mark">N</span>
-            <span>Nexora</span>
+
+          <a
+            href="/"
+            class="brand"
+            aria-label="Nexora home"
+          >
+            <span
+              class="brand-mark"
+              aria-hidden="true"
+            >
+              N
+            </span>
+
+            <span class="brand-copy">
+              <strong>Nexora</strong>
+              <small>AI Workspace</small>
+            </span>
           </a>
-          <button class="close-sidebar icon-button" id="closeSidebar" type="button" aria-label="Close menu">×</button>
+
+          <button
+            class="close-sidebar icon-button"
+            id="closeSidebar"
+            type="button"
+            aria-label="Close sidebar"
+          >
+            ×
+          </button>
+
         </div>
 
-        <button class="new-chat-button" id="newChatButton" type="button">
-          <span class="button-plus">＋</span>
-          <span>New conversation</span>
+
+        <!-- New conversation -->
+        <button
+          class="new-chat-button"
+          id="newChatButton"
+          type="button"
+        >
+          <span
+            class="button-plus"
+            aria-hidden="true"
+          >
+            ＋
+          </span>
+
+          <span>
+            New conversation
+          </span>
+
           <kbd>⌘ K</kbd>
         </button>
 
-        <div class="sidebar-label">Recent conversations</div>
-        <nav class="chat-history" aria-label="Chat history">
-          <button class="history-item active" type="button">
-            <span class="history-icon">✦</span>
-            <span class="history-text">Welcome to Nexora</span>
-            <span class="history-more" aria-hidden="true">•••</span>
+
+        <!-- Workspace switcher -->
+        <button
+          class="workspace-switcher"
+          id="workspaceButton"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded="false"
+        >
+          <span
+            class="workspace-icon"
+            aria-hidden="true"
+          >
+            ◆
+          </span>
+
+          <span class="workspace-copy">
+            <strong>Personal workspace</strong>
+            <small>Private</small>
+          </span>
+
+          <span
+            class="workspace-chevron"
+            aria-hidden="true"
+          >
+            ⌄
+          </span>
+        </button>
+
+
+        <!-- Conversation search -->
+        <button
+          class="sidebar-search"
+          id="sidebarSearchButton"
+          type="button"
+        >
+          <span aria-hidden="true">⌕</span>
+
+          <span>
+            Search conversations
+          </span>
+
+          <kbd>⌘ /</kbd>
+        </button>
+
+
+        <!-- Conversation history -->
+        <div class="sidebar-label">
+          Recent conversations
+        </div>
+
+        <nav
+          class="chat-history"
+          id="chatHistory"
+          aria-label="Recent conversations"
+        >
+
+          <button
+            class="history-item active"
+            type="button"
+            data-conversation-id="welcome"
+          >
+            <span
+              class="history-icon"
+              aria-hidden="true"
+            >
+              ✦
+            </span>
+
+            <span class="history-text">
+              Welcome to Nexora
+            </span>
+
+            <span
+              class="history-more"
+              aria-hidden="true"
+            >
+              •••
+            </span>
           </button>
-          <button class="history-item" type="button">
-            <span class="history-icon">◌</span>
-            <span class="history-text">Project planning ideas</span>
-            <span class="history-more" aria-hidden="true">•••</span>
+
+
+          <button
+            class="history-item"
+            type="button"
+            data-conversation-id="planning"
+          >
+            <span
+              class="history-icon"
+              aria-hidden="true"
+            >
+              ◌
+            </span>
+
+            <span class="history-text">
+              Project planning ideas
+            </span>
+
+            <span
+              class="history-more"
+              aria-hidden="true"
+            >
+              •••
+            </span>
           </button>
-          <button class="history-item" type="button">
-            <span class="history-icon">◌</span>
-            <span class="history-text">Marketing strategy</span>
-            <span class="history-more" aria-hidden="true">•••</span>
+
+
+          <button
+            class="history-item"
+            type="button"
+            data-conversation-id="marketing"
+          >
+            <span
+              class="history-icon"
+              aria-hidden="true"
+            >
+              ◌
+            </span>
+
+            <span class="history-text">
+              Marketing strategy
+            </span>
+
+            <span
+              class="history-more"
+              aria-hidden="true"
+            >
+              •••
+            </span>
           </button>
+
         </nav>
+
+
+        <!-- Sidebar tools -->
+        <div class="sidebar-tools">
+
+          <button
+            class="sidebar-tool"
+            id="projectsButton"
+            type="button"
+          >
+            <span aria-hidden="true">▦</span>
+            <span>Projects</span>
+          </button>
+
+
+          <button
+            class="sidebar-tool"
+            id="savedButton"
+            type="button"
+          >
+            <span aria-hidden="true">◇</span>
+            <span>Saved</span>
+          </button>
+
+
+          <button
+            class="sidebar-tool"
+            id="settingsButton"
+            type="button"
+          >
+            <span aria-hidden="true">⚙</span>
+            <span>Settings</span>
+          </button>
+
+        </div>
+
       </div>
+
+
+      <!-- =====================================================
+           SIDEBAR BOTTOM
+      ====================================================== -->
 
       <div class="sidebar-bottom">
+
+        <!-- Upgrade card -->
         <div class="upgrade-card">
-          <span class="upgrade-icon">✦</span>
-          <div>
-            <strong>Unlock more with Nexora</strong>
-            <p>Deeper insights and smarter workflows.</p>
+
+          <div
+            class="upgrade-icon"
+            aria-hidden="true"
+          >
+            ✦
           </div>
-          <button type="button">Explore plans <span>↗</span></button>
+
+          <div class="upgrade-copy">
+            <strong>
+              Unlock more with Nexora
+            </strong>
+
+            <p>
+              Deeper insights and smarter workflows.
+            </p>
+          </div>
+
+          <button
+            id="plansButton"
+            type="button"
+          >
+            Explore plans
+
+            <span aria-hidden="true">
+              ↗
+            </span>
+          </button>
+
         </div>
 
+
+        <!-- User profile -->
         <div class="profile">
-          <div class="profile-avatar">JD</div>
-          <div class="profile-copy">
-            <strong>Jordan Davis</strong>
-            <small>Personal workspace</small>
+
+          <div
+            class="profile-avatar"
+            aria-hidden="true"
+          >
+            JD
           </div>
-          <button class="profile-more icon-button" type="button" aria-label="Profile options">•••</button>
+
+          <div class="profile-copy">
+            <strong>
+              Jordan Davis
+            </strong>
+
+            <small>
+              Personal workspace
+            </small>
+          </div>
+
+          <button
+            class="profile-more icon-button"
+            id="profileOptionsButton"
+            type="button"
+            aria-label="Profile options"
+          >
+            •••
+          </button>
+
         </div>
+
       </div>
+
     </aside>
 
-    <main class="main-content">
+
+    <!-- =========================================================
+         MAIN CONTENT
+    ========================================================== -->
+
+    <main
+      class="main-content"
+      id="mainContent"
+    >
+
+      <!-- =======================================================
+           TOP BAR
+      ======================================================== -->
+
       <header class="topbar">
-        <button class="menu-button icon-button" id="menuButton" type="button" aria-label="Open menu" aria-controls="sidebar">☰</button>
-        <div class="mobile-brand">
-          <span class="brand-mark">N</span>
-          <strong>Nexora</strong>
+
+        <div class="topbar-left">
+
+          <!-- Mobile menu -->
+          <button
+            class="menu-button icon-button"
+            id="menuButton"
+            type="button"
+            aria-label="Open sidebar"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            ☰
+          </button>
+
+
+          <!-- Mobile brand -->
+          <a
+            href="/"
+            class="mobile-brand"
+            aria-label="Nexora home"
+          >
+            <span
+              class="brand-mark"
+              aria-hidden="true"
+            >
+              N
+            </span>
+
+            <strong>
+              Nexora
+            </strong>
+          </a>
+
+
+          <!-- Workspace context -->
+          <div class="topbar-context">
+
+            <span
+              class="context-indicator"
+              aria-hidden="true"
+            ></span>
+
+            <span>
+              Personal workspace
+            </span>
+
+            <span
+              class="context-chevron"
+              aria-hidden="true"
+            >
+              ⌄
+            </span>
+
+          </div>
+
         </div>
-        <div class="topbar-context">
-          <span class="context-indicator"></span>
-          <span>Personal workspace</span>
-        </div>
+
+
+        <!-- Top-right controls -->
         <div class="topbar-actions">
-          <button class="icon-button" type="button" aria-label="Search">⌕</button>
-          <button class="icon-button" type="button" aria-label="Notifications">♢</button>
-          <button class="top-avatar" type="button" aria-label="Open profile">JD</button>
+
+          <button
+            class="icon-button"
+            id="searchButton"
+            type="button"
+            aria-label="Search"
+          >
+            ⌕
+          </button>
+
+
+          <button
+            class="icon-button notification-button"
+            id="notificationsButton"
+            type="button"
+            aria-label="Notifications"
+            aria-haspopup="true"
+            aria-expanded="false"
+          >
+            ♢
+
+            <span
+              class="notification-badge"
+              aria-label="2 new notifications"
+            >
+              2
+            </span>
+          </button>
+
+
+          <button
+            class="icon-button"
+            id="appearanceButton"
+            type="button"
+            aria-label="Change appearance"
+          >
+            ◐
+          </button>
+
+
+          <button
+            class="top-avatar"
+            id="profileButton"
+            type="button"
+            aria-label="Open profile"
+            aria-haspopup="menu"
+            aria-expanded="false"
+          >
+            JD
+          </button>
+
         </div>
+
       </header>
 
-      <section class="chat-area" aria-label="Nexora conversation">
+
+      <!-- =======================================================
+           CHAT AREA
+      ======================================================== -->
+
+      <section
+        class="chat-area"
+        aria-label="Nexora conversation"
+      >
+
         <div class="chat-container">
+
+          <!-- =================================================
+               AGENT STATUS
+          ================================================== -->
+
           <div class="agent-status">
+
             <div class="agent-identity">
-              <span class="agent-avatar">N</span>
-              <div>
-                <strong>Nexora AI</strong>
-                <span><i class="status-dot"></i> Online and ready</span>
+
+              <span
+                class="agent-avatar"
+                aria-hidden="true"
+              >
+                N
+              </span>
+
+              <div class="agent-meta">
+
+                <div class="agent-name-row">
+
+                  <strong>
+                    Nexora AI
+                  </strong>
+
+                  <span
+                    class="verified-badge"
+                    aria-label="Verified"
+                  >
+                    ✓
+                  </span>
+
+                </div>
+
+                <span class="agent-state">
+
+                  <i
+                    class="status-dot"
+                    aria-hidden="true"
+                  ></i>
+
+                  Online and ready
+
+                </span>
+
               </div>
+
             </div>
-            <button class="details-button" type="button">Agent details <span>⌄</span></button>
+
+
+            <!-- Agent controls -->
+            <div class="agent-actions">
+
+              <button
+                class="model-button"
+                id="modelButton"
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded="false"
+              >
+                <span
+                  class="model-status"
+                  aria-hidden="true"
+                ></span>
+
+                Nexora Intelligence
+
+                <span aria-hidden="true">
+                  ⌄
+                </span>
+              </button>
+
+
+              <button
+                class="details-button"
+                id="detailsButton"
+                type="button"
+                aria-expanded="false"
+                aria-controls="agentDetails"
+              >
+                Agent details
+
+                <span aria-hidden="true">
+                  ⌄
+                </span>
+              </button>
+
+            </div>
+
           </div>
 
-          <div class="conversation" id="chatMessages" aria-live="polite">
+
+          <!-- =================================================
+               AGENT DETAILS
+          ================================================== -->
+
+          <div
+            class="agent-details-panel"
+            id="agentDetails"
+            hidden
+          >
+
+            <div class="detail-item">
+              <span>Mode</span>
+              <strong>
+                Intelligent agent
+              </strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Status</span>
+              <strong>
+                Operational
+              </strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Web access</span>
+              <strong>
+                Available
+              </strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Response mode</span>
+              <strong>
+                Adaptive
+              </strong>
+            </div>
+
+          </div>
+
+
+          <!-- =================================================
+               CONVERSATION
+          ================================================== -->
+
+          <div
+            class="conversation"
+            id="chatMessages"
+            aria-live="polite"
+            aria-atomic="false"
+          >
+
+            <!-- Welcome -->
             <div class="welcome-block">
-              <div class="welcome-orb" aria-hidden="true"><span>✦</span></div>
-              <span class="section-tag">NEXORA AI AGENT</span>
-              <h1>What can I help<br><span>you create?</span></h1>
-              <p>Ask anything, explore an idea, or give Nexora a task. Your intelligent partner is ready for what comes next.</p>
+
+              <div
+                class="welcome-orb"
+                aria-hidden="true"
+              >
+                <span class="orb-glow"></span>
+                <span class="orb-ring"></span>
+                <span class="orb-core">
+                  ✦
+                </span>
+              </div>
+
+
+              <span class="section-tag">
+                NEXORA AI AGENT
+              </span>
+
+
+              <h1>
+                What can I help
+                <br>
+
+                <span>
+                  you create?
+                </span>
+              </h1>
+
+
+              <p>
+                Ask a question, explore an idea, analyze information,
+                or give Nexora a task. Your intelligent workspace is
+                ready when you are.
+              </p>
+
             </div>
 
-            <div class="quick-prompts" aria-label="Suggested prompts">
-              <button class="prompt-card" type="button" data-prompt="Help me organize my day">
-                <span class="prompt-icon cyan">◷</span><span>Organize my day</span><b>↗</b>
+
+            <!-- =================================================
+                 QUICK PROMPTS
+            ================================================== -->
+
+            <div
+              class="quick-prompts"
+              aria-label="Suggested prompts"
+            >
+
+              <button
+                class="prompt-card"
+                type="button"
+                data-prompt="Help me organize my day"
+              >
+
+                <span class="prompt-icon cyan">
+                  ◷
+                </span>
+
+                <span class="prompt-content">
+
+                  <strong>
+                    Organize my day
+                  </strong>
+
+                  <small>
+                    Plan tasks and priorities
+                  </small>
+
+                </span>
+
+                <b aria-hidden="true">
+                  ↗
+                </b>
+
               </button>
-              <button class="prompt-card" type="button" data-prompt="Give me three creative ideas">
-                <span class="prompt-icon purple">✧</span><span>Three creative ideas</span><b>↗</b>
+
+
+              <button
+                class="prompt-card"
+                type="button"
+                data-prompt="Give me three creative ideas"
+              >
+
+                <span class="prompt-icon purple">
+                  ✧
+                </span>
+
+                <span class="prompt-content">
+
+                  <strong>
+                    Creative ideas
+                  </strong>
+
+                  <small>
+                    Think beyond the obvious
+                  </small>
+
+                </span>
+
+                <b aria-hidden="true">
+                  ↗
+                </b>
+
               </button>
-              <button class="prompt-card" type="button" data-prompt="Help me plan a project">
-                <span class="prompt-icon pink">⌁</span><span>Plan a project</span><b>↗</b>
+
+
+              <button
+                class="prompt-card"
+                type="button"
+                data-prompt="Help me plan a project"
+              >
+
+                <span class="prompt-icon pink">
+                  ⌁
+                </span>
+
+                <span class="prompt-content">
+
+                  <strong>
+                    Plan a project
+                  </strong>
+
+                  <small>
+                    Turn an idea into a roadmap
+                  </small>
+
+                </span>
+
+                <b aria-hidden="true">
+                  ↗
+                </b>
+
               </button>
+
             </div>
+
+
+            <!-- =================================================
+                 FEATURE SHORTCUTS
+            ================================================== -->
+
+            <div
+              class="feature-row"
+              aria-label="Nexora features"
+            >
+
+              <button
+                class="feature-chip"
+                type="button"
+                data-prompt="Research this topic for me"
+              >
+                <span aria-hidden="true">
+                  ⌕
+                </span>
+
+                Research
+              </button>
+
+
+              <button
+                class="feature-chip"
+                type="button"
+                data-prompt="Help me brainstorm ideas"
+              >
+                <span aria-hidden="true">
+                  ✧
+                </span>
+
+                Brainstorm
+              </button>
+
+
+              <button
+                class="feature-chip"
+                type="button"
+                data-prompt="Help me write something"
+              >
+                <span aria-hidden="true">
+                  ✎
+                </span>
+
+                Create
+              </button>
+
+
+              <button
+                class="feature-chip"
+                type="button"
+                data-prompt="Analyze this information"
+              >
+                <span aria-hidden="true">
+                  ◌
+                </span>
+
+                Analyze
+              </button>
+
+            </div>
+
           </div>
 
-          <form class="chat-form" id="chatForm">
+
+          <!-- =================================================
+               CHAT COMPOSER
+          ================================================== -->
+
+          <form
+            class="chat-form"
+            id="chatForm"
+            autocomplete="off"
+          >
+
             <div class="input-wrap">
-              <button class="attach-button" type="button" aria-label="Attach file">＋</button>
-              <textarea class="chat-input" id="chatInput" rows="1" placeholder="Message Nexora..." aria-label="Message Nexora" autocomplete="off" required></textarea>
-              <button class="voice-button" type="button" aria-label="Voice input">◉</button>
+
+              <!-- File attachment -->
+              <button
+                class="attach-button"
+                id="attachButton"
+                type="button"
+                aria-label="Attach file"
+                aria-controls="fileInput"
+              >
+                ＋
+              </button>
+
+
+              <input
+                id="fileInput"
+                type="file"
+                hidden
+                multiple
+              >
+
+
+              <!-- Message input -->
+              <textarea
+                class="chat-input"
+                id="chatInput"
+                rows="1"
+                placeholder="Message Nexora..."
+                aria-label="Message Nexora"
+                autocomplete="off"
+                spellcheck="true"
+                maxlength="12000"
+                required
+              ></textarea>
+
+
+              <!-- Voice input -->
+              <button
+                class="voice-button"
+                id="voiceButton"
+                type="button"
+                aria-label="Voice input"
+              >
+                ◉
+              </button>
+
             </div>
-            <button class="send-button" type="submit" aria-label="Send message"><span>↑</span></button>
+
+
+            <!-- Send -->
+            <button
+              class="send-button"
+              type="submit"
+              aria-label="Send message"
+            >
+              <span aria-hidden="true">
+                ↑
+              </span>
+            </button>
+
           </form>
+
+
+          <!-- Attachment preview -->
+          <div
+            class="attachment-preview"
+            id="attachmentPreview"
+            aria-live="polite"
+            hidden
+          ></div>
+
+
+          <!-- Composer information -->
           <div class="composer-note">
-            <span>Nexora can make mistakes. Check important information.</span>
-            <span><kbd>Enter</kbd> to send · <kbd>Shift + Enter</kbd> for a new line</span>
+
+            <span>
+              Nexora can make mistakes.
+              Check important information.
+            </span>
+
+            <span class="keyboard-hints">
+
+              <kbd>Enter</kbd>
+              to send
+
+              ·
+
+              <kbd>Shift + Enter</kbd>
+              for a new line
+
+            </span>
+
           </div>
+
         </div>
+
       </section>
 
+
+      <!-- =======================================================
+           FOOTER
+      ======================================================== -->
+
       <footer>
-        <span>© 2025 Nexora AI</span>
-        <div><a href="#">Privacy</a><a href="#">Terms</a><a href="#">Help center</a></div>
+
+        <span>
+          © 2026 Nexora™
+        </span>
+
+        <div class="footer-links">
+
+          <a href="/privacy.html">
+            Privacy
+          </a>
+
+          <a href="/terms.html">
+            Terms
+          </a>
+
+          <a href="/help.html">
+            Help center
+          </a>
+
+          <button
+            type="button"
+            id="statusButton"
+          >
+            System status
+
+            <span
+              class="footer-status-dot"
+              aria-hidden="true"
+            ></span>
+          </button>
+
+        </div>
+
       </footer>
+
     </main>
+
   </div>
 
-  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+  <!-- =========================================================
+       MOBILE SIDEBAR OVERLAY
+  ========================================================== -->
+
+  <div
+    class="sidebar-overlay"
+    id="sidebarOverlay"
+    aria-hidden="true"
+  ></div>
+
+
+  <!-- =========================================================
+       SEARCH MODAL
+  ========================================================== -->
+
+  <div
+    class="modal-backdrop"
+    id="searchModal"
+    hidden
+  >
+
+    <div
+      class="modal search-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="searchTitle"
+    >
+
+      <div class="modal-header">
+
+        <div>
+
+          <span class="modal-eyebrow">
+            NEXORA
+          </span>
+
+          <h2 id="searchTitle">
+            Search
+          </h2>
+
+        </div>
+
+        <button
+          class="modal-close icon-button"
+          id="closeSearchModal"
+          type="button"
+          aria-label="Close search"
+        >
+          ×
+        </button>
+
+      </div>
+
+
+      <div class="modal-search">
+
+        <span aria-hidden="true">
+          ⌕
+        </span>
+
+        <input
+          id="conversationSearch"
+          type="search"
+          placeholder="Search conversations..."
+          autocomplete="off"
+        >
+
+        <kbd>
+          Esc
+        </kbd>
+
+      </div>
+
+
+      <div
+        class="search-results"
+        id="searchResults"
+      >
+
+        <p class="empty-search">
+          Search your Nexora conversations.
+        </p>
+
+      </div>
+
+    </div>
+
+  </div>
+
+
+  <!-- =========================================================
+       NOTIFICATION PANEL
+  ========================================================== -->
+
+  <div
+    class="popover notification-panel"
+    id="notificationPanel"
+    hidden
+  >
+
+    <div class="popover-header">
+
+      <strong>
+        Notifications
+      </strong>
+
+      <button
+        id="markNotificationsRead"
+        type="button"
+      >
+        Mark read
+      </button>
+
+    </div>
+
+
+    <div class="notification-item">
+
+      <span
+        class="notification-icon"
+        aria-hidden="true"
+      >
+        ✦
+      </span>
+
+      <div>
+
+        <strong>
+          Nexora is ready
+        </strong>
+
+        <p>
+          Your workspace is online.
+        </p>
+
+      </div>
+
+    </div>
+
+
+    <div class="notification-item">
+
+      <span
+        class="notification-icon"
+        aria-hidden="true"
+      >
+        ◇
+      </span>
+
+      <div>
+
+        <strong>
+          Workspace updated
+        </strong>
+
+        <p>
+          Your latest conversation is available.
+        </p>
+
+      </div>
+
+    </div>
+
+  </div>
+
+
+  <!-- =========================================================
+       PROFILE MENU
+  ========================================================== -->
+
+  <div
+    class="popover profile-menu"
+    id="profileMenu"
+    hidden
+  >
+
+    <div class="profile-menu-header">
+
+      <div
+        class="profile-avatar"
+        aria-hidden="true"
+      >
+        JD
+      </div>
+
+      <div>
+
+        <strong>
+          Jordan Davis
+        </strong>
+
+        <small>
+          Personal workspace
+        </small>
+
+      </div>
+
+    </div>
+
+
+    <button type="button">
+      <span aria-hidden="true">◉</span>
+      Account
+    </button>
+
+
+    <button type="button">
+      <span aria-hidden="true">⚙</span>
+      Settings
+    </button>
+
+
+    <button type="button">
+      <span aria-hidden="true">?</span>
+      Help
+    </button>
+
+  </div>
+
+
+  <!-- =========================================================
+       COMMAND PALETTE
+  ========================================================== -->
+
+  <div
+    class="modal-backdrop"
+    id="commandPalette"
+    hidden
+  >
+
+    <div
+      class="modal command-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="commandTitle"
+    >
+
+      <div class="modal-search">
+
+        <span aria-hidden="true">
+          ⌘
+        </span>
+
+        <input
+          id="commandInput"
+          type="search"
+          placeholder="Search commands..."
+          autocomplete="off"
+        >
+
+        <kbd>
+          Esc
+        </kbd>
+
+      </div>
+
+
+      <div class="command-section">
+
+        <span class="command-label">
+          Quick actions
+        </span>
+
+
+        <button
+          class="command-item"
+          type="button"
+          data-command="new-chat"
+        >
+
+          <span aria-hidden="true">
+            ＋
+          </span>
+
+          <strong>
+            New conversation
+          </strong>
+
+          <kbd>
+            ⌘ K
+          </kbd>
+
+        </button>
+
+
+        <button
+          class="command-item"
+          type="button"
+          data-command="search"
+        >
+
+          <span aria-hidden="true">
+            ⌕
+          </span>
+
+          <strong>
+            Search conversations
+          </strong>
+
+          <kbd>
+            ⌘ /
+          </kbd>
+
+        </button>
+
+
+        <button
+          class="command-item"
+          type="button"
+          data-command="settings"
+        >
+
+          <span aria-hidden="true">
+            ⚙
+          </span>
+
+          <strong>
+            Open settings
+          </strong>
+
+        </button>
+
+      </div>
+
+    </div>
+
+  </div>
+
+
+  <!-- =========================================================
+       MODEL MENU
+  ========================================================== -->
+
+  <div
+    class="popover model-menu"
+    id="modelMenu"
+    hidden
+  >
+
+    <div class="popover-header">
+
+      <strong>
+        Intelligence mode
+      </strong>
+
+    </div>
+
+
+    <button
+      class="model-option active"
+      type="button"
+      data-model="adaptive"
+    >
+
+      <span
+        class="model-option-icon"
+        aria-hidden="true"
+      >
+        ✦
+      </span>
+
+      <span>
+
+        <strong>
+          Adaptive
+        </strong>
+
+        <small>
+          Best balance for everyday tasks
+        </small>
+
+      </span>
+
+      <span aria-hidden="true">
+        ✓
+      </span>
+
+    </button>
+
+
+    <button
+      class="model-option"
+      type="button"
+      data-model="deep"
+    >
+
+      <span
+        class="model-option-icon"
+        aria-hidden="true"
+      >
+        ◇
+      </span>
+
+      <span>
+
+        <strong>
+          Deep reasoning
+        </strong>
+
+        <small>
+          More deliberate analysis
+        </small>
+
+      </span>
+
+    </button>
+
+
+    <button
+      class="model-option"
+      type="button"
+      data-model="fast"
+    >
+
+      <span
+        class="model-option-icon"
+        aria-hidden="true"
+      >
+        ϟ
+      </span>
+
+      <span>
+
+        <strong>
+          Fast
+        </strong>
+
+        <small>
+          Quick responses
+        </small>
+
+      </span>
+
+    </button>
+
+  </div>
+
+
+  <!-- =========================================================
+       NEXORA JAVASCRIPT
+  ========================================================== -->
+
   <script src="script.js"></script>
+
 </body>
 </html>
