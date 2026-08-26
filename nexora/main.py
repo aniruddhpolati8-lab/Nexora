@@ -2,1970 +2,2683 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import math
 import os
 import re
+import signal
 import threading
 import time
-from collections import Counter, deque
-from datetime import datetime
+from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.request import Request, urlopen
 
 
 # ============================================================
-# CONFIG
+# NEXORA 3.0
+# API-FREE • RENDER READY • SINGLE FILE
 # ============================================================
 
-APP_NAME = "Nexora"
-VERSION = "12.0"
-SLOGAN = "Intelligence. Secured."
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 HOST = "0.0.0.0"
 
 try:
-    PORT = int(os.environ.get("PORT", "8000"))
+    PORT = int(os.environ.get("PORT", "10000"))
 except ValueError:
-    PORT = 8000
+    PORT = 10000
 
-DATA_FILE = (
-    os.environ.get(
-        "NEXORA_DATA_FILE",
-        "nexora_data.json"
-    ).strip()
-    or "nexora_data.json"
-)
 
-API_KEY = os.environ.get(
-    "NEXORA_API_KEY",
-    ""
-).strip()
+SERVER_NAME = "Nexora"
+SERVER_VERSION = "3.0"
 
-MAX_INPUT = 5000
-MAX_OUTPUT = 12000
-MAX_MEMORIES = 500
-MAX_CONTEXT = 30
-MAX_WEB_RESULTS = 8
+MAX_MESSAGE_LENGTH = 4000
+MAX_HISTORY_ITEMS = 100
+MAX_SEARCH_RESULTS = 8
+MAX_REQUEST_SIZE = 100_000
 
-LOCK = threading.RLock()
+SEARCH_TIMEOUT = 12
 
-
-# ============================================================
-# WEB SEARCH
-# ============================================================
-
-try:
-    from web_search import search, format_results
-
-    WEB_SEARCH_AVAILABLE = True
-    WEB_SEARCH_ERROR = None
-
-except Exception as exc:
-
-    WEB_SEARCH_AVAILABLE = False
-    WEB_SEARCH_ERROR = type(exc).__name__
-
-
-# ============================================================
-# STATE
-# ============================================================
-
-memories: list[dict] = []
-
-knowledge: dict[str, dict] = {}
-
-conversation = deque(
-    maxlen=MAX_CONTEXT
-)
-
-settings = {
-    "mode": "friendly",
-    "response_length": "normal",
-    "emoji": True,
-    "user_name": None,
-}
-
-
-# ============================================================
-# SECURITY
-# ============================================================
-
-SECRET_PATTERNS = [
-    r"\bsk-[A-Za-z0-9_-]{20,}\b",
-    r"\bAIza[A-Za-z0-9_-]{20,}\b",
-    r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
-    r"\b(password|api[_-]?key|secret)\s*[:=]\s*\S+",
-    r"\bbearer\s+[A-Za-z0-9._-]{20,}",
-]
-
-
-DANGEROUS_PATTERNS = [
-    r"\bhow\s+to\s+(kill|hurt|poison)\s+someone\b",
-    r"\bhow\s+to\s+(make|build)\s+(a\s+)?(bomb|explosive|weapon)\b",
-]
-
-
-RISKY_PATTERNS = [
-    r"\bdeadly\s+challenge\b",
-    r"\bdangerous\s+challenge\b",
-    r"\bchoking\s+challenge\b",
-    r"\bhow\s+to\s+get\s+high\b",
-    r"\bhow\s+to\s+starve\b",
-    r"\bhow\s+to\s+purge\b",
-]
-
-
-def contains_secret(text: str) -> bool:
-
-    return any(
-        re.search(
-            pattern,
-            text,
-            re.IGNORECASE
-        )
-        for pattern in SECRET_PATTERNS
-    )
-
-
-def safety_check(
-    text: str
-) -> tuple[bool, str]:
-
-    lower = text.lower()
-
-    if any(
-        re.search(
-            pattern,
-            lower
-        )
-        for pattern in DANGEROUS_PATTERNS
-    ):
-        return False, "dangerous"
-
-    if any(
-        re.search(
-            pattern,
-            lower
-        )
-        for pattern in RISKY_PATTERNS
-    ):
-        return False, "risky"
-
-    if any(
-        phrase in lower
-        for phrase in (
-            "kill myself",
-            "end my life",
-            "hurt myself",
-            "self harm",
-            "self-harm",
-            "suicide",
-        )
-    ):
-        return False, "self_harm"
-
-    return True, "safe"
-
-
-def safety_response(
-    category: str
-) -> str:
-
-    if category == "self_harm":
-
-        return (
-            "I can't provide instructions for hurting "
-            "yourself. Please talk to a trusted adult or "
-            "someone who can support you."
-        )
-
-    if category == "dangerous":
-
-        return (
-            "I can't provide instructions for seriously "
-            "harming people or creating dangerous weapons "
-            "or explosives."
-        )
-
-    return (
-        "I can't encourage dangerous habits or challenges."
-    )
-
-
-# ============================================================
-# PERSISTENCE
-# ============================================================
-
-def load_data() -> None:
-
-    global memories
-    global knowledge
-    global settings
-
-    if not os.path.exists(DATA_FILE):
-        return
-
-    try:
-
-        with open(
-            DATA_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            data = json.load(file)
-
-        if not isinstance(data, dict):
-            return
-
-        raw_memories = data.get(
-            "memories",
-            []
-        )
-
-        if isinstance(
-            raw_memories,
-            list
-        ):
-
-            memories = []
-
-            for item in raw_memories[
-                -MAX_MEMORIES:
-            ]:
-
-                if isinstance(
-                    item,
-                    str
-                ):
-
-                    memories.append({
-                        "text": item,
-                        "created": time.time(),
-                    })
-
-                elif (
-                    isinstance(item, dict)
-                    and isinstance(
-                        item.get("text"),
-                        str
-                    )
-                ):
-
-                    memories.append({
-                        "text": item["text"],
-                        "created": float(
-                            item.get(
-                                "created",
-                                time.time()
-                            )
-                        ),
-                    })
-
-        raw_knowledge = data.get(
-            "knowledge",
-            {}
-        )
-
-        if isinstance(
-            raw_knowledge,
-            dict
-        ):
-
-            for key, value in raw_knowledge.items():
-
-                if isinstance(
-                    value,
-                    str
-                ):
-
-                    knowledge[
-                        str(key).lower()
-                    ] = {
-                        "value": value,
-                        "created": time.time(),
-                    }
-
-                elif (
-                    isinstance(value, dict)
-                    and isinstance(
-                        value.get("value"),
-                        str
-                    )
-                ):
-
-                    knowledge[
-                        str(key).lower()
-                    ] = {
-                        "value": value["value"],
-                        "created": float(
-                            value.get(
-                                "created",
-                                time.time()
-                            )
-                        ),
-                    }
-
-        raw_settings = data.get(
-            "settings",
-            {}
-        )
-
-        if isinstance(
-            raw_settings,
-            dict
-        ):
-
-            settings.update({
-                key: value
-                for key, value
-                in raw_settings.items()
-                if key in settings
-            })
-
-    except Exception:
-
-        pass
-
-
-def save_data() -> None:
-
-    temporary = DATA_FILE + ".tmp"
-
-    try:
-
-        with LOCK:
-
-            data = {
-                "memories": memories,
-                "knowledge": knowledge,
-                "settings": settings,
-            }
-
-        with open(
-            temporary,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                data,
-                file,
-                indent=2,
-                ensure_ascii=False
-            )
-
-        os.replace(
-            temporary,
-            DATA_FILE
-        )
-
-    except Exception:
-
-        try:
-
-            if os.path.exists(
-                temporary
-            ):
-                os.remove(
-                    temporary
-                )
-
-        except OSError:
-
-            pass
-
-
-# ============================================================
-# TEXT RETRIEVAL
-# ============================================================
-
-STOP_WORDS = set(
-    """
-    the a an is are am i you my your to of and or in on
-    it this that what do does did for with me can could
-    would should be have has how why when where please
-    tell about was were will from as at by we our latest
-    current today who
-    """.split()
+USER_AGENT = (
+    "Mozilla/5.0 "
+    "(Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 "
+    "(KHTML, like Gecko) "
+    "Chrome/131.0 Safari/537.36"
 )
 
 
-def words(
-    text: str
-) -> list[str]:
+# ============================================================
+# LOGGING
+# ============================================================
 
-    return [
-        word
-        for word in re.findall(
-            r"[a-zA-Z0-9']+",
-            text.lower()
-        )
-        if word not in STOP_WORDS
-    ]
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+logger = logging.getLogger("nexora")
 
 
-def score(
-    query: str,
-    text: str
-) -> float:
+# ============================================================
+# GLOBAL STATE
+# ============================================================
 
-    query_words = words(query)
-    text_words = words(text)
+history_lock = threading.RLock()
 
-    if (
-        not query_words
-        or not text_words
-    ):
-        return 0.0
+conversation_history: list[dict] = []
 
-    query_counts = Counter(
-        query_words
+
+# ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+
+def now_timestamp() -> float:
+    """Return the current Unix timestamp."""
+
+    return time.time()
+
+
+def clean_html(text: str) -> str:
+    """Convert basic HTML into readable plain text."""
+
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"<script\b[^>]*>.*?</script>",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
-    text_counts = Counter(
-        text_words
+    text = re.sub(
+        r"<style\b[^>]*>.*?</style>",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
-    value = sum(
-        min(
-            count,
-            text_counts.get(
-                word,
-                0
-            )
-        )
-        for word, count
-        in query_counts.items()
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text,
     )
 
-    query_normalized = " ".join(
-        query_words
+    text = unescape(text)
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
     )
 
-    text_normalized = " ".join(
-        text_words
-    )
-
-    if (
-        query_normalized
-        and query_normalized
-        in text_normalized
-    ):
-        value += 3
-
-    return float(value)
+    return text.strip()
 
 
-def memory_search(
-    query: str,
-    limit: int = 5
-) -> list[str]:
+def json_bytes(data: object) -> bytes:
+    """Serialize JSON safely as UTF-8."""
 
-    with LOCK:
-
-        snapshot = list(
-            memories
-        )
-
-    ranked = [
-        (
-            score(
-                query,
-                item["text"]
-            ),
-            item["text"]
-        )
-        for item in snapshot
-    ]
-
-    ranked = [
-        item
-        for item in ranked
-        if item[0] > 0
-    ]
-
-    ranked.sort(
-        reverse=True
-    )
-
-    return [
-        item[1]
-        for item
-        in ranked[:limit]
-    ]
+    return json.dumps(
+        data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
-def knowledge_search(
-    query: str,
-    limit: int = 5
-) -> list[
-    tuple[float, str, str]
-]:
+def clamp_text(text: str, maximum: int) -> str:
+    """Limit text to a maximum number of characters."""
 
-    with LOCK:
+    if len(text) <= maximum:
+        return text
 
-        snapshot = list(
-            knowledge.items()
-        )
-
-    ranked = []
-
-    for key, record in snapshot:
-
-        relevance = (
-            score(
-                query,
-                key
-            )
-            * 3
-            +
-            score(
-                query,
-                record["value"]
-            )
-        )
-
-        if relevance <= 0:
-            continue
-
-        ranked.append(
-            (
-                relevance,
-                key,
-                record["value"]
-            )
-        )
-
-    ranked.sort(
-        reverse=True
-    )
-
-    return ranked[:limit]
-
-
-def add_memory(
-    text: str
-) -> bool:
-
-    text = text.strip()
-
-    if (
-        not text
-        or len(text) > 800
-        or contains_secret(text)
-    ):
-        return False
-
-    with LOCK:
-
-        if any(
-            item["text"].lower()
-            == text.lower()
-            for item in memories
-        ):
-            return True
-
-        memories.append({
-            "text": text,
-            "created": time.time(),
-        })
-
-        del memories[
-            :-MAX_MEMORIES
-        ]
-
-    save_data()
-
-    return True
+    return text[:maximum].rstrip() + "…"
 
 
 # ============================================================
 # SAFE CALCULATOR
 # ============================================================
 
-class Calculator:
+MATH_CONSTANTS = {
+    "pi": math.pi,
+    "e": math.e,
+    "tau": math.tau,
+}
 
-    ALLOWED = (
-        ast.Expression,
-        ast.Constant,
-        ast.UnaryOp,
-        ast.BinOp,
-        ast.Add,
-        ast.Sub,
-        ast.Mult,
-        ast.Div,
-        ast.Mod,
-        ast.Pow,
-        ast.USub,
-        ast.UAdd,
-        ast.FloorDiv,
-    )
 
-    @staticmethod
-    def calculate(
-        expression: str
-    ):
+MATH_FUNCTIONS = {
+    "sqrt": math.sqrt,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "log": math.log,
+    "log10": math.log10,
+    "ceil": math.ceil,
+    "floor": math.floor,
+    "fabs": math.fabs,
+    "factorial": math.factorial,
+}
 
-        if (
-            not expression
-            or len(expression) > 200
-        ):
-            return None
 
-        try:
+BINARY_OPERATORS = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+    ast.Mod: lambda a, b: a % b,
+    ast.Pow: lambda a, b: a ** b,
+}
 
-            tree = ast.parse(
-                expression.strip(),
-                mode="eval"
+
+UNARY_OPERATORS = {
+    ast.UAdd: lambda value: +value,
+    ast.USub: lambda value: -value,
+}
+
+
+def validate_number(value):
+    """Prevent dangerous or unreasonable numeric results."""
+
+    if isinstance(value, bool):
+        raise ValueError("Boolean values are not allowed.")
+
+    if isinstance(value, int):
+
+        if abs(value) > 10**100:
+            raise ValueError(
+                "The result is too large."
             )
 
-            for node in ast.walk(tree):
+    elif isinstance(value, float):
 
-                if not isinstance(
-                    node,
-                    Calculator.ALLOWED
-                ):
-                    return None
-
-            def evaluate(node):
-
-                if isinstance(
-                    node,
-                    ast.Expression
-                ):
-
-                    return evaluate(
-                        node.body
-                    )
-
-                if isinstance(
-                    node,
-                    ast.Constant
-                ):
-
-                    value = node.value
-
-                    if (
-                        isinstance(
-                            value,
-                            bool
-                        )
-                        or not isinstance(
-                            value,
-                            (int, float)
-                        )
-                    ):
-                        return None
-
-                    if not math.isfinite(
-                        float(value)
-                    ):
-                        return None
-
-                    return value
-
-                if isinstance(
-                    node,
-                    ast.UnaryOp
-                ):
-
-                    value = evaluate(
-                        node.operand
-                    )
-
-                    if value is None:
-                        return None
-
-                    if isinstance(
-                        node.op,
-                        ast.USub
-                    ):
-                        return -value
-
-                    if isinstance(
-                        node.op,
-                        ast.UAdd
-                    ):
-                        return value
-
-                    return None
-
-                if isinstance(
-                    node,
-                    ast.BinOp
-                ):
-
-                    left = evaluate(
-                        node.left
-                    )
-
-                    right = evaluate(
-                        node.right
-                    )
-
-                    if (
-                        left is None
-                        or right is None
-                    ):
-                        return None
-
-                    try:
-
-                        if isinstance(
-                            node.op,
-                            ast.Add
-                        ):
-                            result = left + right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Sub
-                        ):
-                            result = left - right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Mult
-                        ):
-                            result = left * right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Div
-                        ):
-
-                            if right == 0:
-                                return None
-
-                            result = left / right
-
-                        elif isinstance(
-                            node.op,
-                            ast.FloorDiv
-                        ):
-
-                            if right == 0:
-                                return None
-
-                            result = left // right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Mod
-                        ):
-
-                            if right == 0:
-                                return None
-
-                            result = left % right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Pow
-                        ):
-
-                            if abs(right) > 100:
-                                return None
-
-                            result = left ** right
-
-                        else:
-
-                            return None
-
-                    except Exception:
-
-                        return None
-
-                    if (
-                        abs(result)
-                        > 10**100
-                    ):
-                        return None
-
-                    if (
-                        isinstance(
-                            result,
-                            float
-                        )
-                        and not math.isfinite(
-                            result
-                        )
-                    ):
-                        return None
-
-                    return result
-
-                return None
-
-            result = evaluate(
-                tree
+        if not math.isfinite(value):
+            raise ValueError(
+                "The result is not finite."
             )
 
-            if isinstance(
-                result,
-                float
-            ):
+        if abs(value) > 1e100:
+            raise ValueError(
+                "The result is too large."
+            )
 
-                return round(
-                    result,
-                    10
-                )
-
-            return result
-
-        except Exception:
-
-            return None
+    return value
 
 
-# ============================================================
-# WEB SEARCH INTELLIGENCE
-# ============================================================
+def safe_calculate(expression: str):
+    """
+    Safely evaluate mathematical expressions.
 
-WEB_TERMS = (
-    "latest",
-    "today",
-    "current",
-    "recent",
-    "news",
-    "score",
-    "scores",
-    "fixture",
-    "fixtures",
-    "standings",
-    "table",
-    "weather",
-    "price",
-    "prices",
-    "release",
-    "released",
-    "update",
-    "updates",
-    "who won",
-    "when is",
-    "where is",
-    "premier league",
-    "champions league",
-    "football",
-    "match",
-    "matches",
-)
+    Only explicitly allowed AST nodes are accepted.
+    """
 
+    expression = expression.strip()
 
-def needs_web_search(
-    text: str
-) -> bool:
-
-    lower = text.lower()
-
-    explicit = lower.startswith(
-        (
-            "search the web",
-            "web search",
-            "search for",
-            "look up",
-            "google ",
-        )
-    )
-
-    current = any(
-        term in lower
-        for term in WEB_TERMS
-    )
-
-    question = lower.startswith(
-        (
-            "who ",
-            "what ",
-            "when ",
-            "where ",
-            "which ",
-            "how many ",
-        )
-    )
-
-    return (
-        explicit
-        or (
-            current
-            and question
-        )
-        or "latest" in lower
-        or (
-            "today" in lower
-            and len(lower.split()) > 2
-        )
-    )
-
-
-def extract_search_query(
-    text: str
-) -> str:
-
-    query = re.sub(
-        r"^(search the web|web search|search for|look up|google)\s*",
-        "",
-        text,
-        flags=re.IGNORECASE
-    ).strip()
-
-    return query or text.strip()
-
-
-def smart_web_search(
-    query: str
-) -> str:
-
-    if not WEB_SEARCH_AVAILABLE:
-
-        return (
-            "Web search is currently unavailable "
-            "because web_search.py could not be loaded."
+    if not expression:
+        raise ValueError(
+            "No expression was provided."
         )
 
-    results = search(
-        query,
-        limit=MAX_WEB_RESULTS
-    )
-
-    if not results:
-
-        return (
-            "I couldn't find useful web results "
-            "for that search."
-        )
-
-    return format_results(
-        results
-    )
-
-
-# ============================================================
-# NEXORA BRAIN
-# ============================================================
-
-class NexoraBrain:
-
-    @staticmethod
-    def answer(
-        message: str
-    ) -> str:
-
-        text = message.strip()
-        lower = text.lower()
-
-        # ----------------------------------------------------
-        # CURRENT INFORMATION
-        # ----------------------------------------------------
-
-        if needs_web_search(text):
-
-            return smart_web_search(
-                extract_search_query(
-                    text
-                )
-            )
-
-        # ----------------------------------------------------
-        # BASIC CONVERSATION
-        # ----------------------------------------------------
-
-        if (
-            lower in {
-                "hi",
-                "hello",
-                "hey",
-                "hiya",
-            }
-            or re.match(
-                r"^(hi|hello|hey|hiya)\b",
-                lower
-            )
-        ):
-
-            name = settings.get(
-                "user_name"
-            )
-
-            if name:
-
-                return (
-                    f"Hey {name}! "
-                    "I'm Nexora. "
-                    "What are we working on?"
-                )
-
-            return (
-                "Hey! I'm Nexora. "
-                "What are we working on?"
-            )
-
-        if lower in {
-            "bye",
-            "goodbye",
-            "see you",
-            "see ya",
-        }:
-
-            return "See you later! 👋"
-
-        # ----------------------------------------------------
-        # IDENTITY
-        # ----------------------------------------------------
-
-        if "who are you" in lower:
-
-            return (
-                f"I'm Nexora v{VERSION}, "
-                "a local-first assistant with "
-                "memory, knowledge retrieval, "
-                "reasoning tools, safety controls, "
-                "and live web search."
-            )
-
-        if (
-            "what can you do" in lower
-            or "capabilities" in lower
-        ):
-
-            return (
-                "I can:\n\n"
-                "• search the live web\n"
-                "• retrieve stored knowledge\n"
-                "• remember information you ask me to remember\n"
-                "• use conversation context\n"
-                "• perform calculations\n"
-                "• compare stored information\n"
-                "• explain stored knowledge\n"
-                "• detect when current information is needed\n"
-                "• apply safety and secret filtering"
-            )
-
-        if "what version" in lower:
-
-            return (
-                f"I'm running Nexora v{VERSION}."
-            )
-
-        if "slogan" in lower:
-
-            return (
-                f"My slogan is: {SLOGAN}"
-            )
-
-        # ----------------------------------------------------
-        # TIME / DATE
-        # ----------------------------------------------------
-
-        if (
-            "what time is it" in lower
-            or "current time" in lower
-        ):
-
-            return datetime.now().strftime(
-                "It's %H:%M:%S right now."
-            )
-
-        if (
-            "what date is it" in lower
-            or "today's date" in lower
-            or "what day is it" in lower
-        ):
-
-            return datetime.now().strftime(
-                "Today is %A, %d %B %Y."
-            )
-
-        # ----------------------------------------------------
-        # MEMORY
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "remember "
-        ):
-
-            value = re.sub(
-                r"^remember\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            value = re.sub(
-                r"^that\s+",
-                "",
-                value,
-                flags=re.IGNORECASE
-            ).strip()
-
-            if add_memory(value):
-
-                return (
-                    "Got it. "
-                    "I've saved that to memory."
-                )
-
-            return (
-                "I couldn't safely save that."
-            )
-
-        if lower in {
-            "what do you remember",
-            "show my memories",
-            "what have i told you",
-        }:
-
-            items = [
-                item["text"]
-                for item in memories
-            ]
-
-            if not items:
-
-                return (
-                    "I don't have any saved "
-                    "memories yet."
-                )
-
-            return (
-                "Here's what I remember:\n\n"
-                + "\n".join(
-                    f"{i}. {item}"
-                    for i, item
-                    in enumerate(
-                        items,
-                        1
-                    )
-                )
-            )
-
-        if lower.startswith(
-            "forget "
-        ):
-
-            target = re.sub(
-                r"^forget\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip().lower()
-
-            with LOCK:
-
-                before = len(
-                    memories
-                )
-
-                memories[:] = [
-                    item
-                    for item in memories
-                    if item["text"].lower()
-                    != target
-                ]
-
-            save_data()
-
-            if len(memories) < before:
-
-                return (
-                    "Done. "
-                    "I've forgotten that memory."
-                )
-
-            return (
-                "I couldn't find that exact memory."
-            )
-
-        # ----------------------------------------------------
-        # KNOWLEDGE
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "teach nexora "
-        ):
-
-            content = re.sub(
-                r"^teach nexora\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            if "=" not in content:
-
-                return (
-                    "Use:\n"
-                    "teach Nexora topic = information"
-                )
-
-            key, value = [
-                part.strip()
-                for part
-                in content.split(
-                    "=",
-                    1
-                )
-            ]
-
-            if (
-                not key
-                or not value
-                or len(key) > 200
-                or len(value) > 4000
-                or contains_secret(value)
-            ):
-
-                return (
-                    "I couldn't safely add "
-                    "that knowledge."
-                )
-
-            with LOCK:
-
-                knowledge[
-                    key.lower()
-                ] = {
-                    "value": value,
-                    "created": time.time(),
-                }
-
-            save_data()
-
-            return (
-                "I've added that to "
-                "my knowledge base."
-            )
-
-        if lower.startswith(
-            "search knowledge "
-        ):
-
-            query = re.sub(
-                r"^search knowledge\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            found = knowledge_search(
-                query
-            )
-
-            if not found:
-
-                return (
-                    "I couldn't find matching "
-                    "knowledge."
-                )
-
-            return "\n".join(
-                f"• {key}: {value}"
-                for _, key, value
-                in found
-            )
-
-        # ----------------------------------------------------
-        # CALCULATOR
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            (
-                "calculate ",
-                "calc ",
-            )
-        ):
-
-            expression = re.sub(
-                r"^(calculate|calc)\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            result = Calculator.calculate(
-                expression
-            )
-
-            if result is None:
-
-                return (
-                    "I couldn't safely "
-                    "calculate that."
-                )
-
-            return (
-                f"The answer is {result}."
-            )
-
-        # ----------------------------------------------------
-        # NAME
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "my name is "
-        ):
-
-            name = re.sub(
-                r"^my name is\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            if (
-                not name
-                or len(name) > 100
-                or contains_secret(name)
-            ):
-
-                return (
-                    "I couldn't safely "
-                    "save that name."
-                )
-
-            settings[
-                "user_name"
-            ] = name
-
-            save_data()
-
-            return (
-                f"Nice to meet you, {name}."
-            )
-
-        if lower in {
-            "what is my name",
-            "what's my name",
-        }:
-
-            name = settings.get(
-                "user_name"
-            )
-
-            if name:
-
-                return (
-                    f"Your saved name is {name}."
-                )
-
-            return (
-                "I don't have your name "
-                "saved yet."
-            )
-
-        # ----------------------------------------------------
-        # MODE
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "set mode "
-        ):
-
-            mode = lower[
-                len("set mode "):
-            ].strip()
-
-            allowed = {
-                "friendly",
-                "professional",
-                "concise",
-                "teacher",
-                "technical",
-                "creative",
-                "formal",
-                "energetic",
-            }
-
-            if mode not in allowed:
-
-                return (
-                    "Available modes: "
-                    + ", ".join(
-                        sorted(allowed)
-                    )
-                )
-
-            settings[
-                "mode"
-            ] = mode
-
-            save_data()
-
-            return (
-                f"Speaking mode changed "
-                f"to {mode}."
-            )
-
-        # ----------------------------------------------------
-        # CLEAR CONTEXT
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "clear conversation"
-        ):
-
-            conversation.clear()
-
-            return (
-                "I've cleared the "
-                "conversation context."
-            )
-
-        # ----------------------------------------------------
-        # LOCAL KNOWLEDGE RETRIEVAL
-        # ----------------------------------------------------
-
-        found = knowledge_search(
-            text,
-            limit=3
-        )
-
-        if (
-            found
-            and found[0][0] >= 2
-        ):
-
-            return found[0][2]
-
-        # ----------------------------------------------------
-        # MEMORY RETRIEVAL
-        # ----------------------------------------------------
-
-        remembered = memory_search(
-            text,
-            limit=3
-        )
-
-        if remembered and any(
-            phrase in lower
-            for phrase in (
-                "remember",
-                "told",
-                "my ",
-            )
-        ):
-
-            return (
-                "I found this in memory:\n\n"
-                + "\n".join(
-                    "• " + item
-                    for item in remembered
-                )
-            )
-
-        # ----------------------------------------------------
-        # NATURAL MATH
-        # ----------------------------------------------------
-
-        candidate = re.sub(
-            r"[^0-9+\-*/().% ]",
-            "",
-            text
-        ).strip()
-
-        if (
-            candidate
-            and any(
-                operator in candidate
-                for operator in (
-                    "+",
-                    "-",
-                    "*",
-                    "/",
-                    "%",
-                )
-            )
-            and len(candidate) <= 100
-        ):
-
-            result = Calculator.calculate(
-                candidate
-            )
-
-            if result is not None:
-
-                return (
-                    f"The answer is {result}."
-                )
-
-        # ----------------------------------------------------
-        # FALLBACK WEB SEARCH
-        # ----------------------------------------------------
-
-        if (
-            "?" in text
-            and WEB_SEARCH_AVAILABLE
-        ):
-
-            return smart_web_search(
-                text
-            )
-
-        # ----------------------------------------------------
-        # UNKNOWN
-        # ----------------------------------------------------
-
-        return (
-            "I don't have enough reliable "
-            "local information to answer "
-            "that confidently.\n\n"
-            "If it needs current information, "
-            "ask me to search the web, for example:\n\n"
-            "search the web Premier League standings"
-        )
-
-
-# ============================================================
-# PIPELINE
-# ============================================================
-
-def process(
-    message: str,
-    client_id: str = "local"
-) -> str:
-
-    if (
-        not isinstance(
-            message,
-            str
-        )
-        or not message.strip()
-    ):
-
-        return (
-            "Please enter a message."
-        )
-
-    message = message.strip()
-
-    if len(message) > MAX_INPUT:
-
-        return (
-            "That message is too long. "
-            f"Maximum length is {MAX_INPUT} characters."
-        )
-
-    if contains_secret(message):
-
-        return (
-            "For your privacy, don't send "
-            "passwords, API keys, access tokens "
-            "or other secrets in chat."
-        )
-
-    allowed, category = safety_check(
-        message
-    )
-
-    if not allowed:
-
-        return safety_response(
-            category
+    if len(expression) > 250:
+        raise ValueError(
+            "That expression is too long."
         )
 
     try:
-
-        conversation.append({
-            "role": "user",
-            "content": message,
-            "timestamp": time.time(),
-        })
-
-        reply = NexoraBrain.answer(
-            message
+        tree = ast.parse(
+            expression,
+            mode="eval",
+        )
+    except SyntaxError:
+        raise ValueError(
+            "That is not a valid mathematical expression."
         )
 
-        if len(reply) > MAX_OUTPUT:
+    def evaluate(node):
 
-            reply = (
-                reply[
-                    :MAX_OUTPUT
-                ].rstrip()
-                + "…"
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+
+        if isinstance(node, ast.Constant):
+
+            if isinstance(node.value, (int, float)):
+                return validate_number(node.value)
+
+            raise ValueError(
+                "Invalid value."
             )
 
-        conversation.append({
-            "role": "assistant",
-            "content": reply,
-            "timestamp": time.time(),
-        })
+        if isinstance(node, ast.BinOp):
 
-        return reply
+            operator = BINARY_OPERATORS.get(
+                type(node.op)
+            )
 
-    except Exception:
+            if operator is None:
+                raise ValueError(
+                    "That operator is not allowed."
+                )
 
-        return (
-            "Nexora encountered an internal "
-            "problem and stopped safely."
+            left = evaluate(node.left)
+            right = evaluate(node.right)
+
+            if (
+                isinstance(node.op, ast.Pow)
+                and abs(right) > 100
+            ):
+                raise ValueError(
+                    "That power is too large."
+                )
+
+            result = operator(
+                left,
+                right,
+            )
+
+            return validate_number(result)
+
+        if isinstance(node, ast.UnaryOp):
+
+            operator = UNARY_OPERATORS.get(
+                type(node.op)
+            )
+
+            if operator is None:
+                raise ValueError(
+                    "That operator is not allowed."
+                )
+
+            result = operator(
+                evaluate(node.operand)
+            )
+
+            return validate_number(result)
+
+        if isinstance(node, ast.Name):
+
+            if node.id in MATH_CONSTANTS:
+                return MATH_CONSTANTS[node.id]
+
+            if node.id in MATH_FUNCTIONS:
+                return MATH_FUNCTIONS[node.id]
+
+            raise ValueError(
+                f"'{node.id}' is not allowed."
+            )
+
+        if isinstance(node, ast.Call):
+
+            if not isinstance(
+                node.func,
+                ast.Name,
+            ):
+                raise ValueError(
+                    "That function is not allowed."
+                )
+
+            function = MATH_FUNCTIONS.get(
+                node.func.id
+            )
+
+            if function is None:
+                raise ValueError(
+                    "That function is not allowed."
+                )
+
+            if len(node.args) > 5:
+                raise ValueError(
+                    "Too many function arguments."
+                )
+
+            arguments = [
+                evaluate(argument)
+                for argument in node.args
+            ]
+
+            try:
+                result = function(*arguments)
+            except Exception:
+                raise ValueError(
+                    "The calculation could not be completed."
+                )
+
+            return validate_number(result)
+
+        raise ValueError(
+            "That expression contains something "
+            "the calculator does not support."
+        )
+
+    return evaluate(tree)
+
+
+# ============================================================
+# WEB SEARCH
+# ============================================================
+
+def extract_search_url(raw_url: str) -> str:
+    """Extract the actual URL from common DuckDuckGo redirects."""
+
+    raw_url = unescape(raw_url)
+
+    if raw_url.startswith("//"):
+        raw_url = "https:" + raw_url
+
+    parsed = urlparse(raw_url)
+
+    query = parse_qs(parsed.query)
+
+    if "uddg" in query and query["uddg"]:
+        return unquote(
+            query["uddg"][0]
+        )
+
+    return raw_url
+
+
+def search_duckduckgo(
+    query: str,
+    limit: int = MAX_SEARCH_RESULTS,
+) -> list[dict]:
+    """
+    Search DuckDuckGo's HTML interface.
+
+    This does not use an API key.
+    """
+
+    query = query.strip()
+
+    if not query:
+        return []
+
+    query = clamp_text(
+        query,
+        500,
+    )
+
+    search_url = (
+        "https://html.duckduckgo.com/html/"
+        f"?q={quote_plus(query)}"
+    )
+
+    request = Request(
+        search_url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-GB,en;q=0.9",
+        },
+    )
+
+    try:
+
+        with urlopen(
+            request,
+            timeout=SEARCH_TIMEOUT,
+        ) as response:
+
+            html = response.read(
+                2_000_000
+            ).decode(
+                "utf-8",
+                errors="ignore",
+            )
+
+    except Exception as exc:
+
+        logger.warning(
+            "Web search failed: %s",
+            exc,
+        )
+
+        return []
+
+    results: list[dict] = []
+
+    # --------------------------------------------------------
+    # Result blocks
+    # --------------------------------------------------------
+
+    blocks = re.findall(
+        r'<div[^>]*class="[^"]*result[^"]*"[^>]*>'
+        r"(.*?)"
+        r"</div>\s*</div>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # Some DuckDuckGo responses don't match the block parser.
+    # Fall back to scanning individual result links.
+    if not blocks:
+
+        links = re.findall(
+            r'<a[^>]+class="[^"]*result__a[^"]*"'
+            r'[^>]+href="([^"]+)"'
+            r'[^>]*>(.*?)</a>',
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        for raw_url, raw_title in links:
+
+            if len(results) >= limit:
+                break
+
+            title = clean_html(raw_title)
+
+            if not title:
+                continue
+
+            results.append(
+                {
+                    "title": title,
+                    "url": extract_search_url(raw_url),
+                    "snippet": "",
+                }
+            )
+
+        return results
+
+    # --------------------------------------------------------
+    # Parse result blocks
+    # --------------------------------------------------------
+
+    for block in blocks:
+
+        if len(results) >= limit:
+            break
+
+        link_match = re.search(
+            r'<a[^>]+class="[^"]*result__a[^"]*"'
+            r'[^>]+href="([^"]+)"'
+            r'[^>]*>(.*?)</a>',
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        if not link_match:
+            continue
+
+        raw_url = link_match.group(1)
+        raw_title = link_match.group(2)
+
+        title = clean_html(
+            raw_title
+        )
+
+        if not title:
+            continue
+
+        snippet_match = re.search(
+            r'class="[^"]*result__snippet[^"]*"'
+            r'[^>]*>(.*?)</',
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        snippet = ""
+
+        if snippet_match:
+
+            snippet = clean_html(
+                snippet_match.group(1)
+            )
+
+        results.append(
+            {
+                "title": clamp_text(
+                    title,
+                    250,
+                ),
+                "url": extract_search_url(
+                    raw_url
+                ),
+                "snippet": clamp_text(
+                    snippet,
+                    600,
+                ),
+            }
+        )
+
+    return results
+
+
+# ============================================================
+# SEARCH INTENT
+# ============================================================
+
+SEARCH_PREFIXES = (
+    "search for ",
+    "search ",
+    "look up ",
+    "look for ",
+    "find online ",
+    "web search ",
+    "google ",
+)
+
+
+def get_search_query(message: str) -> str | None:
+    """Detect explicit search requests."""
+
+    lowered = message.lower().strip()
+
+    for prefix in SEARCH_PREFIXES:
+
+        if lowered.startswith(prefix):
+
+            query = message[
+                len(prefix):
+            ].strip()
+
+            if query:
+                return query
+
+    return None
+
+
+# ============================================================
+# HISTORY
+# ============================================================
+
+def add_history(
+    role: str,
+    message: str,
+    message_type: str = "chat",
+) -> None:
+
+    with history_lock:
+
+        conversation_history.append(
+            {
+                "role": role,
+                "message": clamp_text(
+                    message,
+                    MAX_MESSAGE_LENGTH,
+                ),
+                "type": message_type,
+                "timestamp": now_timestamp(),
+            }
+        )
+
+        if len(conversation_history) > MAX_HISTORY_ITEMS:
+
+            del conversation_history[
+                :len(conversation_history)
+                - MAX_HISTORY_ITEMS
+            ]
+
+
+def get_history() -> list[dict]:
+
+    with history_lock:
+        return list(
+            conversation_history
         )
 
 
+def clear_history() -> None:
+
+    with history_lock:
+        conversation_history.clear()
+
+
 # ============================================================
-# WEB UI
+# LOCAL ASSISTANT
 # ============================================================
 
-HTML = r"""
-<!doctype html>
+def assistant_response(
+    message: str,
+) -> dict:
 
+    message = message.strip()
+
+    if not message:
+
+        return {
+            "type": "error",
+            "message": (
+                "Please enter a message."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Calculator
+    # --------------------------------------------------------
+
+    calculator_match = re.match(
+        r"^(?:calculate|calc)\s+(.+)$",
+        message,
+        flags=re.IGNORECASE,
+    )
+
+    if calculator_match:
+
+        expression = (
+            calculator_match.group(1)
+            .strip()
+        )
+
+        try:
+
+            result = safe_calculate(
+                expression
+            )
+
+            return {
+                "type": "calculator",
+                "message": (
+                    f"**{expression}** = **{result}**"
+                ),
+                "result": result,
+            }
+
+        except ValueError as exc:
+
+            return {
+                "type": "error",
+                "message": str(exc),
+            }
+
+    # --------------------------------------------------------
+    # Web search
+    # --------------------------------------------------------
+
+    search_query = get_search_query(
+        message
+    )
+
+    if search_query:
+
+        results = search_duckduckgo(
+            search_query
+        )
+
+        if not results:
+
+            return {
+                "type": "search",
+                "message": (
+                    f"I couldn't retrieve search "
+                    f"results for **{search_query}** "
+                    "right now."
+                ),
+                "results": [],
+            }
+
+        return {
+            "type": "search",
+            "message": (
+                f"Here are the web results for "
+                f"**{search_query}**."
+            ),
+            "results": results,
+        }
+
+    # --------------------------------------------------------
+    # Help
+    # --------------------------------------------------------
+
+    if message.lower() in {
+        "help",
+        "commands",
+        "what can you do",
+        "features",
+    }:
+
+        return {
+            "type": "chat",
+            "message": (
+                "### What I can do\n\n"
+                "🔎 **Web search**\n"
+                "Use `search <topic>` to search "
+                "the web.\n\n"
+                "🧮 **Calculator**\n"
+                "Use `calculate 25 * 18` for "
+                "a calculation.\n\n"
+                "💬 **Conversation**\n"
+                "Chat with me normally.\n\n"
+                "⚡ **Fast local processing**\n"
+                "Nexora doesn't require an OpenAI API "
+                "key to run."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Greetings
+    # --------------------------------------------------------
+
+    if message.lower() in {
+        "hi",
+        "hello",
+        "hey",
+        "yo",
+        "hiya",
+    }:
+
+        return {
+            "type": "chat",
+            "message": (
+                "Hey! 👋\n\n"
+                "Nexora is online and ready."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Time
+    # --------------------------------------------------------
+
+    if message.lower() in {
+        "time",
+        "what time is it",
+        "what's the time",
+    }:
+
+        current_time = time.strftime(
+            "%H:%M:%S"
+        )
+
+        return {
+            "type": "chat",
+            "message": (
+                f"The server time is "
+                f"**{current_time}**."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Version
+    # --------------------------------------------------------
+
+    if message.lower() in {
+        "version",
+        "what version are you",
+    }:
+
+        return {
+            "type": "chat",
+            "message": (
+                f"You're running **Nexora "
+                f"{SERVER_VERSION}**."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Default
+    # --------------------------------------------------------
+
+    return {
+        "type": "chat",
+        "message": (
+            "I'm Nexora. ⚡\n\n"
+            "I can search the web, perform "
+            "calculations, and handle local "
+            "conversation features without "
+            "an OpenAI API.\n\n"
+            "Try:\n"
+            "- `search latest technology news`\n"
+            "- `calculate 125 * 48`\n"
+            "- `help`"
+        ),
+    }
+
+
+# ============================================================
+# HTML
+# ============================================================
+
+INDEX_HTML = r"""
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
 
-<meta charset="utf-8">
+    <meta charset="UTF-8">
 
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
 
-<title>Nexora</title>
+    <meta
+        name="theme-color"
+        content="#06080d"
+    >
 
-<style>
+    <meta
+        name="description"
+        content="Nexora — intelligent tools in one sleek workspace."
+    >
 
-* {
-    box-sizing: border-box;
-}
+    <title>Nexora</title>
 
-body {
-    margin: 0;
-    min-height: 100vh;
-    background: #050008;
-    color: #fff;
-    font-family: Arial, sans-serif;
-}
+    <style>
 
-.wrap {
-    width: min(1050px, 94%);
-    margin: 28px auto;
-}
+        :root {
+            --bg: #05070b;
+            --panel: rgba(11, 15, 24, 0.82);
+            --panel-2: rgba(16, 20, 31, 0.88);
 
-.head {
-    text-align: center;
-}
+            --border: rgba(255, 255, 255, 0.075);
+            --border-hover: rgba(92, 240, 255, 0.30);
 
-.logo {
-    font-size: 64px;
-    font-weight: 900;
+            --text: #f4f7ff;
+            --muted: #8d97aa;
+            --dim: #596274;
 
-    background:
-        linear-gradient(
-            90deg,
-            #fff,
-            #67ffff,
-            #d000ff
-        );
+            --cyan: #55efff;
+            --purple: #a25cff;
 
-    color: transparent;
-    background-clip: text;
-    -webkit-background-clip: text;
-}
+            --cyan-soft: rgba(85, 239, 255, 0.10);
+            --purple-soft: rgba(162, 92, 255, 0.11);
 
-.slogan {
-    color: #67ffff;
-    letter-spacing: 5px;
-    font-size: 11px;
-}
+            --radius: 17px;
+        }
 
-.status {
-    color: #888;
-    margin: 8px;
-}
 
-.chat {
-    height: 68vh;
-    min-height: 430px;
-    overflow: auto;
+        * {
+            box-sizing: border-box;
+        }
 
-    padding: 22px;
 
-    border: 1px solid #5d1475;
-    border-radius: 20px;
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+        }
 
-    background: #09060f;
-}
 
-.msg {
-    max-width: 82%;
+        body {
+            overflow: hidden;
 
-    padding: 14px 17px;
-    margin: 0 0 16px;
+            color: var(--text);
 
-    border-radius: 16px;
+            background:
+                radial-gradient(
+                    circle at 85% 10%,
+                    rgba(85, 239, 255, 0.065),
+                    transparent 27%
+                ),
+                radial-gradient(
+                    circle at 15% 90%,
+                    rgba(162, 92, 255, 0.065),
+                    transparent 28%
+                ),
+                var(--bg);
 
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+            font-family:
+                Inter,
+                ui-sans-serif,
+                system-ui,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+        }
 
-    line-height: 1.55;
-}
 
-.bot {
-    border-left: 3px solid #67ffff;
-    background: #18152a;
-}
+        button,
+        textarea {
+            font: inherit;
+        }
 
-.user {
-    margin-left: auto;
 
-    background:
-        linear-gradient(
-            135deg,
-            #6500ff,
-            #c000ff
-        );
-}
+        button {
+            border: 0;
+        }
 
-.sender {
-    display: block;
 
-    color: #67ffff;
+        /* ==================================================
+           APP
+           ================================================== */
 
-    font-size: 10px;
-    font-weight: bold;
+        .app {
+            display: flex;
 
-    letter-spacing: 2px;
+            width: 100%;
+            height: 100%;
+        }
 
-    margin-bottom: 6px;
-}
 
-.composer {
-    display: flex;
-    gap: 10px;
-    margin-top: 15px;
-}
+        /* ==================================================
+           SIDEBAR
+           ================================================== */
 
-input {
-    flex: 1;
+        .sidebar {
+            width: 265px;
 
-    padding: 16px;
+            display: flex;
+            flex-direction: column;
 
-    border: 1px solid #7500ff;
-    border-radius: 13px;
+            padding: 23px 17px;
 
-    background: #110819;
-    color: #fff;
+            background:
+                rgba(6, 9, 15, 0.76);
 
-    font-size: 15px;
+            border-right:
+                1px solid var(--border);
 
-    outline: none;
-}
+            backdrop-filter:
+                blur(25px);
+        }
 
-button {
-    border: 0;
-    border-radius: 13px;
 
-    padding: 0 25px;
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
 
-    color: #fff;
+            padding:
+                2px 9px 25px;
+        }
 
-    font-weight: bold;
 
-    background:
-        linear-gradient(
-            135deg,
-            #7000ff,
-            #c000ff
-        );
+        .brand-icon {
+            width: 40px;
+            height: 40px;
 
-    cursor: pointer;
-}
+            display: grid;
+            place-items: center;
 
-button:disabled {
-    opacity: .5;
-}
+            border-radius: 13px;
 
-</style>
+            color: var(--cyan);
+
+            background:
+                linear-gradient(
+                    135deg,
+                    var(--cyan-soft),
+                    var(--purple-soft)
+                );
+
+            border:
+                1px solid var(--border-hover);
+
+            box-shadow:
+                0 0 35px rgba(85, 239, 255, 0.08);
+
+            font-size: 20px;
+        }
+
+
+        .brand-name {
+            font-size: 15px;
+            font-weight: 850;
+
+            letter-spacing: 3px;
+        }
+
+
+        .brand-version {
+            margin-top: 2px;
+
+            color: var(--dim);
+
+            font-size: 9px;
+            font-weight: 700;
+
+            letter-spacing: 1.5px;
+        }
+
+
+        .new-chat {
+            width: 100%;
+
+            display: flex;
+            align-items: center;
+            gap: 9px;
+
+            padding: 12px 13px;
+
+            color: var(--text);
+
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(85, 239, 255, 0.075),
+                    rgba(162, 92, 255, 0.075)
+                );
+
+            border:
+                1px solid var(--border-hover);
+
+            border-radius: 12px;
+
+            cursor: pointer;
+
+            transition:
+                transform .18s ease,
+                border-color .18s ease,
+                background .18s ease;
+        }
+
+
+        .new-chat:hover {
+            transform: translateY(-1px);
+
+            border-color:
+                rgba(85, 239, 255, 0.48);
+
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(85, 239, 255, 0.12),
+                    rgba(162, 92, 255, 0.12)
+                );
+        }
+
+
+        .sidebar-title {
+            margin:
+                28px 10px 9px;
+
+            color: var(--dim);
+
+            font-size: 9px;
+            font-weight: 800;
+
+            letter-spacing: 1.7px;
+        }
+
+
+        .side-button {
+            width: 100%;
+
+            display: flex;
+            align-items: center;
+            gap: 11px;
+
+            padding: 10px 11px;
+
+            margin-bottom: 3px;
+
+            color: var(--muted);
+
+            background: transparent;
+
+            border:
+                1px solid transparent;
+
+            border-radius: 11px;
+
+            cursor: pointer;
+
+            text-align: left;
+
+            transition:
+                color .18s ease,
+                background .18s ease,
+                border-color .18s ease;
+        }
+
+
+        .side-button:hover,
+        .side-button.active {
+            color: var(--text);
+
+            background:
+                rgba(255, 255, 255, 0.038);
+
+            border-color:
+                var(--border);
+        }
+
+
+        .side-icon {
+            width: 20px;
+
+            color: var(--dim);
+
+            text-align: center;
+        }
+
+
+        .side-button.active .side-icon {
+            color: var(--cyan);
+        }
+
+
+        .sidebar-footer {
+            margin-top: auto;
+        }
+
+
+        .system-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+
+            padding: 12px;
+
+            background:
+                rgba(255, 255, 255, 0.025);
+
+            border:
+                1px solid var(--border);
+
+            border-radius: 13px;
+        }
+
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+
+            flex-shrink: 0;
+
+            border-radius: 50%;
+
+            background: var(--cyan);
+
+            box-shadow:
+                0 0 12px var(--cyan);
+        }
+
+
+        .system-status strong {
+            display: block;
+
+            font-size: 11px;
+        }
+
+
+        .system-status small {
+            display: block;
+
+            margin-top: 3px;
+
+            color: var(--dim);
+
+            font-size: 9px;
+        }
+
+
+        /* ==================================================
+           MAIN
+           ================================================== */
+
+        .main {
+            min-width: 0;
+
+            flex: 1;
+
+            display: flex;
+            flex-direction: column;
+        }
+
+
+        .topbar {
+            height: 68px;
+
+            display: flex;
+            align-items: center;
+
+            padding:
+                0 24px;
+
+            border-bottom:
+                1px solid var(--border);
+
+            background:
+                rgba(5, 7, 11, 0.38);
+
+            backdrop-filter:
+                blur(22px);
+        }
+
+
+        .mobile-brand {
+            display: none;
+
+            font-size: 13px;
+            font-weight: 850;
+
+            letter-spacing: 2px;
+        }
+
+
+        .topbar-right {
+            margin-left: auto;
+
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+
+        .online {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+
+            color: var(--muted);
+
+            font-size: 11px;
+        }
+
+
+        .online::before {
+            content: "";
+
+            width: 6px;
+            height: 6px;
+
+            border-radius: 50%;
+
+            background: var(--cyan);
+
+            box-shadow:
+                0 0 10px var(--cyan);
+        }
+
+
+        .icon-button {
+            width: 34px;
+            height: 34px;
+
+            display: grid;
+            place-items: center;
+
+            color: var(--muted);
+
+            background: transparent;
+
+            border:
+                1px solid transparent;
+
+            border-radius: 9px;
+
+            cursor: pointer;
+
+            transition: .18s ease;
+        }
+
+
+        .icon-button:hover {
+            color: var(--text);
+
+            background:
+                rgba(255, 255, 255, 0.04);
+
+            border-color:
+                var(--border);
+        }
+
+
+        /* ==================================================
+           CHAT
+           ================================================== */
+
+        .chat {
+            flex: 1;
+
+            overflow-y: auto;
+
+            padding:
+                38px 7%;
+        }
+
+
+        .chat::-webkit-scrollbar {
+            width: 7px;
+        }
+
+
+        .chat::-webkit-scrollbar-thumb {
+            background:
+                rgba(255, 255, 255, 0.08);
+
+            border-radius: 10px;
+        }
+
+
+        .welcome {
+            max-width: 760px;
+
+            margin:
+                7vh auto 0;
+
+            text-align: center;
+        }
+
+
+        .welcome-icon {
+            width: 65px;
+            height: 65px;
+
+            display: grid;
+            place-items: center;
+
+            margin:
+                0 auto 23px;
+
+            color: var(--cyan);
+
+            background:
+                linear-gradient(
+                    135deg,
+                    var(--cyan-soft),
+                    var(--purple-soft)
+                );
+
+            border:
+                1px solid var(--border-hover);
+
+            border-radius: 20px;
+
+            font-size: 27px;
+
+            box-shadow:
+                0 0 55px rgba(85, 239, 255, 0.07);
+        }
+
+
+        .eyebrow {
+            color: var(--cyan);
+
+            font-size: 10px;
+            font-weight: 850;
+
+            letter-spacing: 3px;
+        }
+
+
+        h1 {
+            margin:
+                12px 0 16px;
+
+            font-size:
+                clamp(40px, 6vw, 70px);
+
+            line-height: .98;
+
+            letter-spacing: -3.5px;
+        }
+
+
+        h1 span {
+            background:
+                linear-gradient(
+                    100deg,
+                    var(--cyan),
+                    #ffffff 48%,
+                    var(--purple)
+                );
+
+            color: transparent;
+
+            -webkit-background-clip: text;
+            background-clip: text;
+        }
+
+
+        .welcome-description {
+            max-width: 570px;
+
+            margin:
+                0 auto 27px;
+
+            color: var(--muted);
+
+            font-size: 14px;
+
+            line-height: 1.7;
+        }
+
+
+        .quick-actions {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+
+            gap: 8px;
+        }
+
+
+        .quick-action {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+
+            padding:
+                9px 12px;
+
+            color: #aeb7c7;
+
+            background:
+                rgba(255, 255, 255, 0.032);
+
+            border:
+                1px solid var(--border);
+
+            border-radius: 10px;
+
+            cursor: pointer;
+
+            transition:
+                transform .18s ease,
+                border-color .18s ease,
+                color .18s ease;
+        }
+
+
+        .quick-action:hover {
+            color: var(--text);
+
+            border-color:
+                rgba(85, 239, 255, 0.25);
+
+            transform:
+                translateY(-2px);
+        }
+
+
+        .quick-action span {
+            color: var(--cyan);
+        }
+
+
+        /* ==================================================
+           MESSAGES
+           ================================================== */
+
+        .message {
+            max-width: 850px;
+
+            margin:
+                0 auto 15px;
+
+            padding:
+                15px 17px;
+
+            border-radius: 15px;
+
+            line-height: 1.65;
+
+            animation:
+                messageIn .22s ease;
+        }
+
+
+        @keyframes messageIn {
+
+            from {
+                opacity: 0;
+                transform:
+                    translateY(6px);
+            }
+
+            to {
+                opacity: 1;
+                transform:
+                    translateY(0);
+            }
+
+        }
+
+
+        .message.user {
+            margin-right: 0;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    rgba(85, 239, 255, 0.07),
+                    rgba(162, 92, 255, 0.07)
+                );
+
+            border:
+                1px solid
+                rgba(85, 239, 255, 0.10);
+        }
+
+
+        .message.assistant {
+            margin-left: 0;
+
+            background:
+                rgba(255, 255, 255, 0.032);
+
+            border:
+                1px solid var(--border);
+        }
+
+
+        .message-label {
+            margin-bottom: 6px;
+
+            color: var(--cyan);
+
+            font-size: 9px;
+            font-weight: 850;
+
+            letter-spacing: 1.5px;
+        }
+
+
+        .search-results {
+            display: grid;
+
+            gap: 8px;
+
+            margin-top: 14px;
+        }
+
+
+        .search-result {
+            display: block;
+
+            padding: 12px;
+
+            color: var(--text);
+
+            background:
+                rgba(0, 0, 0, 0.16);
+
+            border:
+                1px solid var(--border);
+
+            border-radius: 11px;
+
+            text-decoration: none;
+
+            transition:
+                transform .18s ease,
+                border-color .18s ease;
+        }
+
+
+        .search-result:hover {
+            transform:
+                translateX(2px);
+
+            border-color:
+                rgba(85, 239, 255, 0.28);
+        }
+
+
+        .result-title {
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+
+        .result-url {
+            margin-top: 3px;
+
+            overflow: hidden;
+
+            color: var(--cyan);
+
+            font-size: 9px;
+
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+
+        .result-snippet {
+            margin-top: 6px;
+
+            color: var(--muted);
+
+            font-size: 11px;
+
+            line-height: 1.55;
+        }
+
+
+        /* ==================================================
+           COMPOSER
+           ================================================== */
+
+        .composer-area {
+            padding:
+                0 7% 22px;
+        }
+
+
+        .composer {
+            max-width: 850px;
+
+            margin: 0 auto;
+
+            display: flex;
+            align-items: flex-end;
+            gap: 9px;
+
+            padding:
+                9px 9px 9px 16px;
+
+            background:
+                rgba(12, 16, 25, 0.90);
+
+            border:
+                1px solid
+                rgba(255, 255, 255, 0.10);
+
+            border-radius: 17px;
+
+            box-shadow:
+                0 18px 65px
+                rgba(0, 0, 0, 0.30);
+
+            backdrop-filter:
+                blur(25px);
+
+            transition:
+                border-color .18s ease,
+                box-shadow .18s ease;
+        }
+
+
+        .composer:focus-within {
+            border-color:
+                rgba(85, 239, 255, 0.30);
+
+            box-shadow:
+                0 18px 65px
+                rgba(0, 0, 0, 0.32),
+                0 0 35px
+                rgba(85, 239, 255, 0.045);
+        }
+
+
+        #messageInput {
+            flex: 1;
+
+            min-width: 0;
+
+            max-height: 145px;
+
+            resize: none;
+
+            padding:
+                8px 0;
+
+            color: var(--text);
+
+            background: transparent;
+
+            border: 0;
+
+            outline: 0;
+
+            line-height: 1.5;
+        }
+
+
+        #messageInput::placeholder {
+            color: #687286;
+        }
+
+
+        .send-button {
+            width: 42px;
+            height: 42px;
+
+            flex-shrink: 0;
+
+            display: grid;
+            place-items: center;
+
+            color: #041016;
+
+            background:
+                linear-gradient(
+                    135deg,
+                    var(--cyan),
+                    #a9f9ff
+                );
+
+            border-radius: 12px;
+
+            cursor: pointer;
+
+            font-size: 21px;
+            font-weight: 800;
+
+            transition:
+                transform .18s ease,
+                box-shadow .18s ease,
+                opacity .18s ease;
+        }
+
+
+        .send-button:hover {
+            transform:
+                translateY(-2px);
+
+            box-shadow:
+                0 8px 25px
+                rgba(85, 239, 255, 0.19);
+        }
+
+
+        .send-button:disabled {
+            opacity: .42;
+
+            cursor: default;
+
+            transform: none;
+
+            box-shadow: none;
+        }
+
+
+        .hint {
+            max-width: 850px;
+
+            margin:
+                7px auto 0;
+
+            color: var(--dim);
+
+            font-size: 9px;
+
+            text-align: center;
+        }
+
+
+        /* ==================================================
+           TYPING
+           ================================================== */
+
+        .typing-dots {
+            display: inline-flex;
+
+            gap: 3px;
+
+            margin-left: 4px;
+        }
+
+
+        .typing-dots span {
+            width: 4px;
+            height: 4px;
+
+            border-radius: 50%;
+
+            background: var(--cyan);
+
+            animation:
+                blink 1.1s infinite;
+        }
+
+
+        .typing-dots span:nth-child(2) {
+            animation-delay: .15s;
+        }
+
+
+        .typing-dots span:nth-child(3) {
+            animation-delay: .30s;
+        }
+
+
+        @keyframes blink {
+
+            0%,
+            70%,
+            100% {
+                opacity: .25;
+            }
+
+            35% {
+                opacity: 1;
+            }
+
+        }
+
+
+        /* ==================================================
+           MOBILE
+           ================================================== */
+
+        @media (max-width: 760px) {
+
+            body {
+                overflow: hidden;
+            }
+
+
+            .sidebar {
+                display: none;
+            }
+
+
+            .mobile-brand {
+                display: block;
+            }
+
+
+            .topbar {
+                height: 59px;
+
+                padding:
+                    0 15px;
+            }
+
+
+            .chat {
+                padding:
+                    24px 13px;
+            }
+
+
+            .welcome {
+                margin-top:
+                    5vh;
+            }
+
+
+            h1 {
+                font-size: 43px;
+
+                letter-spacing: -2.5px;
+            }
+
+
+            .welcome-description {
+                font-size: 13px;
+            }
+
+
+            .composer-area {
+                padding:
+                    0 11px 13px;
+            }
+
+
+            .hint {
+                display: none;
+            }
+
+
+            .message {
+                padding:
+                    13px 14px;
+            }
+
+        }
+
+    </style>
 
 </head>
 
+
 <body>
 
-<div class="wrap">
+    <div class="app">
 
-<div class="head">
+        <aside class="sidebar">
 
-<div class="logo">
-Nexora
-</div>
+            <div class="brand">
 
-<div class="slogan">
-INTELLIGENCE. SECURED.
-</div>
+                <div class="brand-icon">
+                    ✦
+                </div>
 
-<div class="status">
-v12.0 • Local Reasoning • Memory • Web Search
-</div>
+                <div>
 
-</div>
+                    <div class="brand-name">
+                        NEXORA
+                    </div>
 
-<div
-    class="chat"
-    id="chat"
->
+                    <div class="brand-version">
+                        VERSION 3.0
+                    </div>
 
-<div class="msg bot">
+                </div>
 
-<span class="sender">
-NEXORA
-</span>
-
-Hey! I'm Nexora v12. What are we working on?
-
-</div>
-
-</div>
-
-<form
-    class="composer"
-    id="form"
->
-
-<input
-    id="input"
-    maxlength="5000"
-    autocomplete="off"
-    placeholder="Talk to Nexora..."
->
-
-<button
-    id="send"
->
-
-Send
-
-</button>
-
-</form>
-
-</div>
-
-<script>
-
-const form =
-    document.getElementById("form");
-
-const input =
-    document.getElementById("input");
-
-const send =
-    document.getElementById("send");
-
-const chat =
-    document.getElementById("chat");
+            </div>
 
 
-function addMessage(
-    sender,
-    text,
-    type
-) {
-
-    const message =
-        document.createElement("div");
-
-    message.className =
-        "msg " + type;
-
-    const senderElement =
-        document.createElement("span");
-
-    senderElement.className =
-        "sender";
-
-    senderElement.textContent =
-        sender;
-
-    message.appendChild(
-        senderElement
-    );
-
-    message.appendChild(
-        document.createTextNode(text)
-    );
-
-    chat.appendChild(
-        message
-    );
-
-    chat.scrollTop =
-        chat.scrollHeight;
-}
+            <button
+                class="new-chat"
+                id="newChat"
+            >
+                <span>＋</span>
+                New conversation
+            </button>
 
 
-form.addEventListener(
-    "submit",
-    async function(event) {
+            <div class="sidebar-title">
+                WORKSPACE
+            </div>
 
-        event.preventDefault();
 
-        const text =
-            input.value.trim();
+            <button
+                class="side-button active"
+            >
+                <span class="side-icon">
+                    ◈
+                </span>
+                Assistant
+            </button>
 
-        if (!text) {
-            return;
+
+            <button
+                class="side-button"
+                id="searchShortcut"
+            >
+                <span class="side-icon">
+                    ⌕
+                </span>
+                Web search
+            </button>
+
+
+            <button
+                class="side-button"
+                id="calculatorShortcut"
+            >
+                <span class="side-icon">
+                    ∑
+                </span>
+                Calculator
+            </button>
+
+
+            <div class="sidebar-footer">
+
+                <div class="system-status">
+
+                    <span class="status-dot"></span>
+
+                    <div>
+
+                        <strong>
+                            System online
+                        </strong>
+
+                        <small>
+                            API-free engine
+                        </small>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+        </aside>
+
+
+        <main class="main">
+
+            <header class="topbar">
+
+                <div class="mobile-brand">
+                    ✦ NEXORA
+                </div>
+
+                <div class="topbar-right">
+
+                    <div class="online">
+                        Online
+                    </div>
+
+                    <button
+                        class="icon-button"
+                        id="clearHistory"
+                        title="Clear conversation"
+                    >
+                        ⌫
+                    </button>
+
+                </div>
+
+            </header>
+
+
+            <section
+                class="chat"
+                id="chat"
+            >
+
+                <div
+                    class="welcome"
+                    id="welcome"
+                >
+
+                    <div class="welcome-icon">
+                        ✦
+                    </div>
+
+                    <div class="eyebrow">
+                        NEXORA 3.0
+                    </div>
+
+                    <h1>
+                        Intelligence,
+                        <span>simplified.</span>
+                    </h1>
+
+                    <p class="welcome-description">
+                        A fast, clean workspace for
+                        web search, calculations,
+                        and everyday exploration.
+                    </p>
+
+
+                    <div class="quick-actions">
+
+                        <button
+                            class="quick-action"
+                            data-prompt="search latest technology news"
+                        >
+                            <span>⌕</span>
+                            Search the web
+                        </button>
+
+
+                        <button
+                            class="quick-action"
+                            data-prompt="calculate 125 * 48"
+                        >
+                            <span>∑</span>
+                            Calculate
+                        </button>
+
+
+                        <button
+                            class="quick-action"
+                            data-prompt="help"
+                        >
+                            <span>✦</span>
+                            Explore Nexora
+                        </button>
+
+                    </div>
+
+                </div>
+
+            </section>
+
+
+            <div class="composer-area">
+
+                <div class="composer">
+
+                    <textarea
+                        id="messageInput"
+                        rows="1"
+                        maxlength="4000"
+                        placeholder="Ask Nexora anything..."
+                        autocomplete="off"
+                    ></textarea>
+
+
+                    <button
+                        class="send-button"
+                        id="sendButton"
+                        aria-label="Send message"
+                    >
+                        ↑
+                    </button>
+
+                </div>
+
+
+                <div class="hint">
+                    Enter to send · Shift + Enter for a new line
+                </div>
+
+            </div>
+
+        </main>
+
+    </div>
+
+
+    <script>
+
+        // ====================================================
+        // ELEMENTS
+        // ====================================================
+
+        const chat =
+            document.getElementById("chat");
+
+        const welcome =
+            document.getElementById("welcome");
+
+        const input =
+            document.getElementById("messageInput");
+
+        const sendButton =
+            document.getElementById("sendButton");
+
+        const newChat =
+            document.getElementById("newChat");
+
+        const clearHistory =
+            document.getElementById("clearHistory");
+
+        const searchShortcut =
+            document.getElementById("searchShortcut");
+
+        const calculatorShortcut =
+            document.getElementById("calculatorShortcut");
+
+
+        // ====================================================
+        // HTML ESCAPING
+        // ====================================================
+
+        function escapeHtml(value) {
+
+            return String(value)
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
         }
 
-        addMessage(
-            "YOU",
-            text,
-            "user"
-        );
 
-        input.value = "";
+        // ====================================================
+        // SIMPLE MARKDOWN
+        // ====================================================
 
-        send.disabled = true;
+        function formatText(value) {
 
-        try {
+            let text =
+                escapeHtml(value);
 
-            const response =
+
+            text = text.replace(
+                /\*\*(.*?)\*\*/g,
+                "<strong>$1</strong>"
+            );
+
+
+            text = text.replace(
+                /\n/g,
+                "<br>"
+            );
+
+
+            return text;
+        }
+
+
+        // ====================================================
+        // SCROLL
+        // ====================================================
+
+        function scrollToBottom() {
+
+            chat.scrollTo({
+                top: chat.scrollHeight,
+                behavior: "smooth"
+            });
+        }
+
+
+        // ====================================================
+        // ADD MESSAGE
+        // ====================================================
+
+        function addMessage(
+            role,
+            content,
+            results = []
+        ) {
+
+            if (welcome) {
+                welcome.style.display = "none";
+            }
+
+
+            const message =
+                document.createElement("div");
+
+
+            message.className =
+                `message ${role}`;
+
+
+            const label =
+                role === "user"
+                    ? "YOU"
+                    : "NEXORA";
+
+
+            let html = `
+                <div class="message-label">
+                    ${label}
+                </div>
+
+                
+                   html += `
+                    <div class="search-results">
+                `;
+
+
+                for (
+                    const result of results
+                ) {
+
+                    const title =
+                        escapeHtml(
+                            result.title ||
+                            "Untitled result"
+                        );
+
+
+                    const url =
+                        escapeHtml(
+                            result.url ||
+                            "#"
+                        );
+
+
+                    const snippet =
+                        escapeHtml(
+                            result.snippet ||
+                            ""
+                        );
+
+
+                    html += `
+                        <a
+                            class="search-result"
+                            href="${url}"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+
+                            <div class="result-title">
+                                ${title}
+                            </div>
+
+                            <div class="result-url">
+                                ${url}
+                            </div>
+
+                            <div class="result-snippet">
+                                ${snippet}
+                            </div>
+
+                        </a>
+                    `;
+                }
+
+
+                html += `
+                    </div>
+                `;
+            }
+
+
+            message.innerHTML =
+                html;
+
+
+            chat.appendChild(
+                message
+            );
+
+
+            scrollToBottom();
+        }
+
+
+        // ====================================================
+        // TYPING
+        // ====================================================
+
+        function showTyping() {
+
+            const typing =
+                document.createElement("div");
+
+
+            typing.id =
+                "typing";
+
+
+            typing.className =
+                "message assistant";
+
+
+            typing.innerHTML = `
+                <div class="message-label">
+                    NEXORA
+                </div>
+
+                <div>
+                    Working
+
+                    <span class="typing-dots">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </span>
+                </div>
+            `;
+
+
+            chat.appendChild(
+                typing
+            );
+
+
+            scrollToBottom();
+        }
+
+
+        function removeTyping() {
+
+            const typing =
+                document.getElementById(
+                    "typing"
+                );
+
+
+            if (typing) {
+                typing.remove();
+            }
+        }
+
+
+        // ====================================================
+        // INPUT RESIZE
+        // ====================================================
+
+        function resizeInput() {
+
+            input.style.height =
+                "auto";
+
+
+            input.style.height =
+                Math.min(
+                    input.scrollHeight,
+                    145
+                ) + "px";
+        }
+
+
+        // ====================================================
+        // SEND
+        // ====================================================
+
+        async function sendMessage() {
+
+            const message =
+                input.value.trim();
+
+
+            if (!message) {
+                return;
+            }
+
+
+            addMessage(
+                "user",
+                message
+            );
+
+
+            input.value = "";
+
+            resizeInput();
+
+            sendButton.disabled = true;
+
+            showTyping();
+
+
+            try {
+
+                const response =
+                    await fetch(
+                        "/api/chat",
+                        {
+                            method: "POST",
+
+                            headers: {
+                                "Content-Type":
+                                    "application/json"
+                            },
+
+                            body:
+                                JSON.stringify({
+                                    message
+                                })
+                        }
+                    );
+
+
+                let data;
+
+
+                try {
+
+                    data =
+                        await response.json();
+
+                } catch {
+
+                    throw new Error(
+                        "The server returned invalid JSON."
+                    );
+                }
+
+
+                removeTyping();
+
+
+                if (!response.ok) {
+
+                    addMessage(
+                        "assistant",
+                        data.error ||
+                        "The request failed."
+                    );
+
+                    return;
+                }
+
+
+                addMessage(
+                    "assistant",
+                    data.message ||
+                    "No response was returned.",
+                    data.results || []
+                );
+
+
+            } catch (error) {
+
+                removeTyping();
+
+
+                addMessage(
+                    "assistant",
+                    "I couldn't connect to Nexora. "
+                    + "Check that the server is running."
+                );
+
+
+                console.error(
+                    "Nexora error:",
+                    error
+                );
+
+            } finally {
+
+                sendButton.disabled =
+                    false;
+
+                input.focus();
+            }
+        }
+
+
+        // ====================================================
+        // NEW CHAT
+        // ====================================================
+
+        async function clearConversation() {
+
+            try {
+
                 await fetch(
-                    "/api/web-chat",
+                    "/api/history/clear",
                     {
-                        method: "POST",
-
-                        headers: {
-                            "Content-Type":
-                                "application/json"
-                        },
-
-                        body: JSON.stringify({
-                            message: text
-                        })
+                        method: "POST"
                     }
                 );
 
-            const data =
-                await response.json();
+            } catch (error) {
 
-            addMessage(
-                "NEXORA",
-                data.reply ||
-                data.error ||
-                "No response.",
-                "bot"
-            );
+                console.error(error);
+            }
 
-        } catch (error) {
 
-            addMessage(
-                "NEXORA",
-                "I could not connect to the server.",
-                "bot"
-            );
+            chat
+                .querySelectorAll(
+                    ".message"
+                )
+                .forEach(
+                    element =>
+                        element.remove()
+                );
 
-        } finally {
 
-            send.disabled = false;
+            if (welcome) {
+                welcome.style.display =
+                    "";
+            }
+
+
+            input.value = "";
+
+            resizeInput();
 
             input.focus();
         }
-    }
-);
 
-input.focus();
 
-</script>
+        // ====================================================
+        // QUICK PROMPTS
+        // ====================================================
+
+        document
+            .querySelectorAll(
+                "[data-prompt]"
+            )
+            .forEach(
+                button => {
+
+                    button.addEventListener(
+                        "click",
+                        () => {
+
+                            input.value =
+                                button.dataset.prompt;
+
+                            resizeInput();
+
+                            sendMessage();
+                        }
+                    );
+                }
+            );
+
+
+        // ====================================================
+        // SIDEBAR SHORTCUTS
+        // ====================================================
+
+        searchShortcut.addEventListener(
+            "click",
+            () => {
+
+                input.value =
+                    "search latest technology news";
+
+                resizeInput();
+
+                input.focus();
+            }
+        );
+
+
+        calculatorShortcut.addEventListener(
+            "click",
+            () => {
+
+                input.value =
+                    "calculate ";
+
+                resizeInput();
+
+                input.focus();
+            }
+        );
+
+
+        // ====================================================
+        // EVENTS
+        // ====================================================
+
+        input.addEventListener(
+            "input",
+            resizeInput
+        );
+
+
+        input.addEventListener(
+            "keydown",
+            event => {
+
+                if (
+                    event.key === "Enter" &&
+                    !event.shiftKey
+                ) {
+
+                    event.preventDefault();
+
+                    sendMessage();
+                }
+            }
+        );
+
+
+        sendButton.addEventListener(
+            "click",
+            sendMessage
+        );
+
+
+        newChat.addEventListener(
+            "click",
+            clearConversation
+        );
+
+
+        clearHistory.addEventListener(
+            "click",
+            clearConversation
+        );
+
+
+        // ====================================================
+        // STARTUP
+        // ====================================================
+
+        input.focus();
+
+    </script>
 
 </body>
 
@@ -1977,2564 +2690,682 @@ input.focus();
 # HTTP SERVER
 # ============================================================
 
-class Server(
+class NexoraHandler(
     BaseHTTPRequestHandler
 ):
 
     server_version = (
-        "NexoraHTTP/12.0"
+        f"Nexora/{SERVER_VERSION}"
     )
+
+    # --------------------------------------------------------
+    # Common headers
+    # --------------------------------------------------------
+
+    def send_common_headers(
+        self,
+        content_type: str,
+        content_length: int,
+    ) -> None:
+
+        self.send_header(
+            "Content-Type",
+            content_type,
+        )
+
+        self.send_header(
+            "Content-Length",
+            str(content_length),
+        )
+
+        self.send_header(
+            "Cache-Control",
+            "no-store",
+        )
+
+        self.send_header(
+            "X-Content-Type-Options",
+            "nosniff",
+        )
+
+        self.send_header(
+            "X-Frame-Options",
+            "SAMEORIGIN",
+        )
+
+        self.send_header(
+            "Referrer-Policy",
+            "strict-origin-when-cross-origin",
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            "*",
+        )
+
+    # --------------------------------------------------------
+    # JSON response
+    # --------------------------------------------------------
 
     def send_json(
         self,
-        data,
-        status=200
-    ):
+        status: int,
+        data: object,
+    ) -> None:
 
-        body = json.dumps(
-            data,
-            ensure_ascii=False
-        ).encode("utf-8")
+        body = json_bytes(data)
 
         self.send_response(
             status
         )
 
-        self.send_header(
-            "Content-Type",
-            "application/json; charset=utf-8"
-        )
-
-        self.send_header(
-            "Cache-Control",
-            "no-store"
-        )
-
-        self.send_header(
-            "X-Content-Type-Options",
-            "nosniff"
-        )
-
-        self.send_header(
-            "Content-Length",
-            str(len(body))
+        self.send_common_headers(
+            "application/json; charset=utf-8",
+            len(body),
         )
 
         self.end_headers()
 
-        self.wfile.write(
-            body
+        self.wfile.write(body)
+
+    # --------------------------------------------------------
+    # HTML response
+    # --------------------------------------------------------
+
+    def send_html(
+        self,
+        html: str,
+    ) -> None:
+
+        body = html.encode(
+            "utf-8"
         )
 
-    def do_GET(self):
+        self.send_response(
+            200
+        )
 
-        path = urlparse(
+        self.send_common_headers(
+            "text/html; charset=utf-8",
+            len(body),
+        )
+
+        self.end_headers()
+
+        self.wfile.write(body)
+
+    # --------------------------------------------------------
+    # OPTIONS
+    # --------------------------------------------------------
+
+    def do_OPTIONS(self) -> None:
+
+        self.send_response(
+            204
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            "*",
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS",
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type",
+        )
+
+        self.end_headers()
+
+    # --------------------------------------------------------
+    # GET
+    # --------------------------------------------------------
+
+    def do_GET(self) -> None:
+
+        parsed = urlparse(
             self.path
-        ).path
+        )
 
-        if path == "/":
+        path = parsed.path
 
-            body = HTML.encode(
-                "utf-8"
-            )
 
-            self.send_response(
-                200
-            )
+        # ----------------------------------------------------
+        # Main UI
+        # ----------------------------------------------------
 
-            self.send_header(
-                "Content-Type",
-                "text/html; charset=utf-8"
-            )
+        if path in {
+            "/",
+            "/index.html",
+        }:
 
-            self.send_header(
-                "Content-Length",
-                str(len(body))
-            )
-
-            self.end_headers()
-
-            self.wfile.write(
-                body
+            self.send_html(
+                INDEX_HTML
             )
 
             return
+
+
+        # ----------------------------------------------------
+        # Health
+        # ----------------------------------------------------
 
         if path == "/health":
 
-            self.send_json({
-                "status": "ok",
-                "name": APP_NAME,
-                "version": VERSION,
-                "web_search":
-                    WEB_SEARCH_AVAILABLE,
-                "web_search_error":
-                    WEB_SEARCH_ERROR,
-            })
+            self.send_json(
+                200,
+                {
+                    "status": "healthy",
+                    "service": SERVER_NAME,
+                    "version": SERVER_VERSION,
+                    "api_required": False,
+                },
+            )
 
             return
 
-        self.send_json(
-            {"error": "Not found"},
-            404
-        )
 
-    def do_POST(self):
+        # ----------------------------------------------------
+        # API information
+        # ----------------------------------------------------
 
-        path = urlparse(
-            self.path
-        ).path
-
-        if path not in (
-            "/api/web-chat",
-            "/api/chat",
-        ):
+        if path == "/api":
 
             self.send_json(
-                {"error": "Not found"},
-                404
+                200,
+                {
+                    "name": SERVER_NAME,
+                    "version": SERVER_VERSION,
+                    "status": "online",
+                    "api_required": False,
+                    "features": [
+                        "chat",
+                        "web_search",
+                        "calculator",
+                        "history",
+                    ],
+                },
             )
 
             return
 
-        if (
-            path == "/api/chat"
-            and API_KEY
-        ):
 
-            provided = self.headers.get(
-                "X-API-Key",
-                ""
+        # ----------------------------------------------------
+        # History
+        # ----------------------------------------------------
+
+        if path == "/api/history":
+
+            self.send_json(
+                200,
+                {
+                    "history": get_history(),
+                },
             )
 
-            if provided != API_KEY:
+            return
+
+
+        # ----------------------------------------------------
+        # Search API
+        # ----------------------------------------------------
+
+        if path == "/api/search":
+
+            params = parse_qs(
+                parsed.query
+            )
+
+            query = params.get(
+                "q",
+                [""],
+            )[0].strip()
+
+
+            if not query:
 
                 self.send_json(
+                    400,
                     {
                         "error":
-                        "Authentication required."
+                            "Missing search query."
                     },
-                    401
                 )
 
                 return
 
-        try:
 
-            content_length = int(
+            results =
+                search_duckduckgo(
+                    query
+                )
+
+
+            self.send_json(
+                200,
+                {
+                    "query": query,
+                    "results": results,
+                },
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # 404
+        # ----------------------------------------------------
+
+        self.send_json(
+            404,
+            {
+                "error": "Route not found.",
+            },
+        )
+
+    # --------------------------------------------------------
+    # POST
+    # --------------------------------------------------------
+
+    def do_POST(self) -> None:
+
+        parsed = urlparse(
+            self.path
+        )
+
+        path = parsed.path
+
+
+        # ----------------------------------------------------
+        # Chat
+        # ----------------------------------------------------
+
+        if path == "/api/chat":
+
+            content_length_header =
                 self.headers.get(
                     "Content-Length",
-                    "0"
+                    "0",
                 )
-            )
+
+
+            try:
+
+                content_length =
+                    int(
+                        content_length_header
+                    )
+
+            except ValueError:
+
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                            "Invalid Content-Length."
+                    },
+                )
+
+                return
+
 
             if (
                 content_length <= 0
-                or content_length > 100000
+                or content_length >
+                MAX_REQUEST_SIZE
             ):
 
                 self.send_json(
+                    413,
                     {
                         "error":
-                        "Request too large."
+                            "Request is too large."
                     },
-                    413
                 )
 
                 return
 
-            data = json.loads(
-                self.rfile.read(
-                    content_length
-                ).decode("utf-8")
-            )
+
+            try:
+
+                raw_body =
+                    self.rfile.read(
+                        content_length
+                    )
+
+            except Exception:
+
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                            "Could not read request."
+                    },
+                )
+
+                return
+
+
+            try:
+
+                payload =
+                    json.loads(
+                        raw_body.decode(
+                            "utf-8"
+                        )
+                    )
+
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ):
+
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                            "Request body must be valid JSON."
+                    },
+                )
+
+                return
+
 
             if not isinstance(
-                data,
-                dict
+                payload,
+                dict,
             ):
 
                 self.send_json(
+                    400,
                     {
                         "error":
-                        "JSON object required."
+                            "JSON body must be an object."
                     },
-                    400
                 )
 
                 return
 
-            message = data.get(
-                "message"
-            )
+
+            message =
+                payload.get(
+                    "message",
+                    "",
+                )
+
 
             if not isinstance(
                 message,
-                str
+                str,
             ):
 
                 self.send_json(
+                    400,
                     {
                         "error":
-                        "The 'message' field "
-                        "must be text."
+                            "Message must be text."
                     },
-                    400
                 )
 
                 return
 
-            reply = process(
-                message,
-                self.client_address[0]
-            )
 
-            self.send_json({
-                "reply": reply
-            })
+            message =
+                message.strip()
 
-        except Exception:
 
-            self.send_json(
-                {
-                    "error":
-                    "Invalid request."
-                },
-                400
-            )
+            if not message:
 
-    def log_message(
-        self,
-        format_string,
-        *args
-    ):
-
-        return
-
-
-# ============================================================
-# STARTUP
-# ============================================================
-
-def main():
-
-    load_data()
-
-    print("=" * 60)
-
-    print(
-        f"{APP_NAME} {VERSION} - {SLOGAN}"
-    )
-
-    print(
-        f"Port: {PORT}"
-    )
-
-    print(
-        "Web search:",
-        "ENABLED"
-        if WEB_SEARCH_AVAILABLE
-        else "DISABLED"
-    )
-
-    if not WEB_SEARCH_AVAILABLE:
-
-        print(
-            "Web search error:",
-            WEB_SEARCH_ERROR
-        )
-
-    print("=" * 60)
-
-    server = ThreadingHTTPServer(
-        (HOST, PORT),
-        Server
-    )
-
-    try:
-
-        server.serve_forever()
-
-    except KeyboardInterrupt:
-
-        print(
-            "Nexora shutting down."
-        )
-
-    finally:
-
-        server.server_close()
-
-
-if __name__ == "__main__":
-
-
-
-import ast
-import json
-import math
-import os
-import re
-import threading
-import time
-from collections import Counter, deque
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
-
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-APP_NAME = "Nexora"
-VERSION = "12.0"
-SLOGAN = "Intelligence. Secured."
-
-HOST = "0.0.0.0"
-
-try:
-    PORT = int(os.environ.get("PORT", "8000"))
-except ValueError:
-    PORT = 8000
-
-DATA_FILE = (
-    os.environ.get(
-        "NEXORA_DATA_FILE",
-        "nexora_data.json"
-    ).strip()
-    or "nexora_data.json"
-)
-
-API_KEY = os.environ.get(
-    "NEXORA_API_KEY",
-    ""
-).strip()
-
-MAX_INPUT = 5000
-MAX_OUTPUT = 12000
-MAX_MEMORIES = 500
-MAX_CONTEXT = 30
-MAX_WEB_RESULTS = 8
-
-LOCK = threading.RLock()
-
-
-# ============================================================
-# WEB SEARCH
-# ============================================================
-
-try:
-    from web_search import search, format_results
-
-    WEB_SEARCH_AVAILABLE = True
-    WEB_SEARCH_ERROR = None
-
-except Exception as exc:
-
-    WEB_SEARCH_AVAILABLE = False
-    WEB_SEARCH_ERROR = type(exc).__name__
-
-
-# ============================================================
-# STATE
-# ============================================================
-
-memories: list[dict] = []
-
-knowledge: dict[str, dict] = {}
-
-conversation = deque(
-    maxlen=MAX_CONTEXT
-)
-
-settings = {
-    "mode": "friendly",
-    "response_length": "normal",
-    "emoji": True,
-    "user_name": None,
-}
-
-
-# ============================================================
-# SECURITY
-# ============================================================
-
-SECRET_PATTERNS = [
-    r"\bsk-[A-Za-z0-9_-]{20,}\b",
-    r"\bAIza[A-Za-z0-9_-]{20,}\b",
-    r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
-    r"\b(password|api[_-]?key|secret)\s*[:=]\s*\S+",
-    r"\bbearer\s+[A-Za-z0-9._-]{20,}",
-]
-
-
-DANGEROUS_PATTERNS = [
-    r"\bhow\s+to\s+(kill|hurt|poison)\s+someone\b",
-    r"\bhow\s+to\s+(make|build)\s+(a\s+)?(bomb|explosive|weapon)\b",
-]
-
-
-RISKY_PATTERNS = [
-    r"\bdeadly\s+challenge\b",
-    r"\bdangerous\s+challenge\b",
-    r"\bchoking\s+challenge\b",
-    r"\bhow\s+to\s+get\s+high\b",
-    r"\bhow\s+to\s+starve\b",
-    r"\bhow\s+to\s+purge\b",
-]
-
-
-def contains_secret(text: str) -> bool:
-
-    return any(
-        re.search(
-            pattern,
-            text,
-            re.IGNORECASE
-        )
-        for pattern in SECRET_PATTERNS
-    )
-
-
-def safety_check(
-    text: str
-) -> tuple[bool, str]:
-
-    lower = text.lower()
-
-    if any(
-        re.search(
-            pattern,
-            lower
-        )
-        for pattern in DANGEROUS_PATTERNS
-    ):
-        return False, "dangerous"
-
-    if any(
-        re.search(
-            pattern,
-            lower
-        )
-        for pattern in RISKY_PATTERNS
-    ):
-        return False, "risky"
-
-    if any(
-        phrase in lower
-        for phrase in (
-            "kill myself",
-            "end my life",
-            "hurt myself",
-            "self harm",
-            "self-harm",
-            "suicide",
-        )
-    ):
-        return False, "self_harm"
-
-    return True, "safe"
-
-
-def safety_response(
-    category: str
-) -> str:
-
-    if category == "self_harm":
-
-        return (
-            "I can't provide instructions for hurting "
-            "yourself. Please talk to a trusted adult or "
-            "someone who can support you."
-        )
-
-    if category == "dangerous":
-
-        return (
-            "I can't provide instructions for seriously "
-            "harming people or creating dangerous weapons "
-            "or explosives."
-        )
-
-    return (
-        "I can't encourage dangerous habits or challenges."
-    )
-
-
-# ============================================================
-# PERSISTENCE
-# ============================================================
-
-def load_data() -> None:
-
-    global memories
-    global knowledge
-    global settings
-
-    if not os.path.exists(DATA_FILE):
-        return
-
-    try:
-
-        with open(
-            DATA_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
-            data = json.load(file)
-
-        if not isinstance(data, dict):
-            return
-
-        raw_memories = data.get(
-            "memories",
-            []
-        )
-
-        if isinstance(
-            raw_memories,
-            list
-        ):
-
-            memories = []
-
-            for item in raw_memories[
-                -MAX_MEMORIES:
-            ]:
-
-                if isinstance(
-                    item,
-                    str
-                ):
-
-                    memories.append({
-                        "text": item,
-                        "created": time.time(),
-                    })
-
-                elif (
-                    isinstance(item, dict)
-                    and isinstance(
-                        item.get("text"),
-                        str
-                    )
-                ):
-
-                    memories.append({
-                        "text": item["text"],
-                        "created": float(
-                            item.get(
-                                "created",
-                                time.time()
-                            )
-                        ),
-                    })
-
-        raw_knowledge = data.get(
-            "knowledge",
-            {}
-        )
-
-        if isinstance(
-            raw_knowledge,
-            dict
-        ):
-
-            for key, value in raw_knowledge.items():
-
-                if isinstance(
-                    value,
-                    str
-                ):
-
-                    knowledge[
-                        str(key).lower()
-                    ] = {
-                        "value": value,
-                        "created": time.time(),
-                    }
-
-                elif (
-                    isinstance(value, dict)
-                    and isinstance(
-                        value.get("value"),
-                        str
-                    )
-                ):
-
-                    knowledge[
-                        str(key).lower()
-                    ] = {
-                        "value": value["value"],
-                        "created": float(
-                            value.get(
-                                "created",
-                                time.time()
-                            )
-                        ),
-                    }
-
-        raw_settings = data.get(
-            "settings",
-            {}
-        )
-
-        if isinstance(
-            raw_settings,
-            dict
-        ):
-
-            settings.update({
-                key: value
-                for key, value
-                in raw_settings.items()
-                if key in settings
-            })
-
-    except Exception:
-
-        pass
-
-
-def save_data() -> None:
-
-    temporary = DATA_FILE + ".tmp"
-
-    try:
-
-        with LOCK:
-
-            data = {
-                "memories": memories,
-                "knowledge": knowledge,
-                "settings": settings,
-            }
-
-        with open(
-            temporary,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                data,
-                file,
-                indent=2,
-                ensure_ascii=False
-            )
-
-        os.replace(
-            temporary,
-            DATA_FILE
-        )
-
-    except Exception:
-
-        try:
-
-            if os.path.exists(
-                temporary
-            ):
-                os.remove(
-                    temporary
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                            "Message cannot be empty."
+                    },
                 )
 
-        except OSError:
+                return
 
-            pass
-
-
-# ============================================================
-# TEXT RETRIEVAL
-# ============================================================
-
-STOP_WORDS = set(
-    """
-    the a an is are am i you my your to of and or in on
-    it this that what do does did for with me can could
-    would should be have has how why when where please
-    tell about was were will from as at by we our latest
-    current today who
-    """.split()
-)
-
-
-def words(
-    text: str
-) -> list[str]:
-
-    return [
-        word
-        for word in re.findall(
-            r"[a-zA-Z0-9']+",
-            text.lower()
-        )
-        if word not in STOP_WORDS
-    ]
-
-
-def score(
-    query: str,
-    text: str
-) -> float:
-
-    query_words = words(query)
-    text_words = words(text)
-
-    if (
-        not query_words
-        or not text_words
-    ):
-        return 0.0
-
-    query_counts = Counter(
-        query_words
-    )
-
-    text_counts = Counter(
-        text_words
-    )
-
-    value = sum(
-        min(
-            count,
-            text_counts.get(
-                word,
-                0
-            )
-        )
-        for word, count
-        in query_counts.items()
-    )
-
-    query_normalized = " ".join(
-        query_words
-    )
-
-    text_normalized = " ".join(
-        text_words
-    )
-
-    if (
-        query_normalized
-        and query_normalized
-        in text_normalized
-    ):
-        value += 3
-
-    return float(value)
-
-
-def memory_search(
-    query: str,
-    limit: int = 5
-) -> list[str]:
-
-    with LOCK:
-
-        snapshot = list(
-            memories
-        )
-
-    ranked = [
-        (
-            score(
-                query,
-                item["text"]
-            ),
-            item["text"]
-        )
-        for item in snapshot
-    ]
-
-    ranked = [
-        item
-        for item in ranked
-        if item[0] > 0
-    ]
-
-    ranked.sort(
-        reverse=True
-    )
-
-    return [
-        item[1]
-        for item
-        in ranked[:limit]
-    ]
-
-
-def knowledge_search(
-    query: str,
-    limit: int = 5
-) -> list[
-    tuple[float, str, str]
-]:
-
-    with LOCK:
-
-        snapshot = list(
-            knowledge.items()
-        )
-
-    ranked = []
-
-    for key, record in snapshot:
-
-        relevance = (
-            score(
-                query,
-                key
-            )
-            * 3
-            +
-            score(
-                query,
-                record["value"]
-            )
-        )
-
-        if relevance <= 0:
-            continue
-
-        ranked.append(
-            (
-                relevance,
-                key,
-                record["value"]
-            )
-        )
-
-    ranked.sort(
-        reverse=True
-    )
-
-    return ranked[:limit]
-
-
-def add_memory(
-    text: str
-) -> bool:
-
-    text = text.strip()
-
-    if (
-        not text
-        or len(text) > 800
-        or contains_secret(text)
-    ):
-        return False
-
-    with LOCK:
-
-        if any(
-            item["text"].lower()
-            == text.lower()
-            for item in memories
-        ):
-            return True
-
-        memories.append({
-            "text": text,
-            "created": time.time(),
-        })
-
-        del memories[
-            :-MAX_MEMORIES
-        ]
-
-    save_data()
-
-    return True
-
-
-# ============================================================
-# SAFE CALCULATOR
-# ============================================================
-
-class Calculator:
-
-    ALLOWED = (
-        ast.Expression,
-        ast.Constant,
-        ast.UnaryOp,
-        ast.BinOp,
-        ast.Add,
-        ast.Sub,
-        ast.Mult,
-        ast.Div,
-        ast.Mod,
-        ast.Pow,
-        ast.USub,
-        ast.UAdd,
-        ast.FloorDiv,
-    )
-
-    @staticmethod
-    def calculate(
-        expression: str
-    ):
-
-        if (
-            not expression
-            or len(expression) > 200
-        ):
-            return None
-
-        try:
-
-            tree = ast.parse(
-                expression.strip(),
-                mode="eval"
-            )
-
-            for node in ast.walk(tree):
-
-                if not isinstance(
-                    node,
-                    Calculator.ALLOWED
-                ):
-                    return None
-
-            def evaluate(node):
-
-                if isinstance(
-                    node,
-                    ast.Expression
-                ):
-
-                    return evaluate(
-                        node.body
-                    )
-
-                if isinstance(
-                    node,
-                    ast.Constant
-                ):
-
-                    value = node.value
-
-                    if (
-                        isinstance(
-                            value,
-                            bool
-                        )
-                        or not isinstance(
-                            value,
-                            (int, float)
-                        )
-                    ):
-                        return None
-
-                    if not math.isfinite(
-                        float(value)
-                    ):
-                        return None
-
-                    return value
-
-                if isinstance(
-                    node,
-                    ast.UnaryOp
-                ):
-
-                    value = evaluate(
-                        node.operand
-                    )
-
-                    if value is None:
-                        return None
-
-                    if isinstance(
-                        node.op,
-                        ast.USub
-                    ):
-                        return -value
-
-                    if isinstance(
-                        node.op,
-                        ast.UAdd
-                    ):
-                        return value
-
-                    return None
-
-                if isinstance(
-                    node,
-                    ast.BinOp
-                ):
-
-                    left = evaluate(
-                        node.left
-                    )
-
-                    right = evaluate(
-                        node.right
-                    )
-
-                    if (
-                        left is None
-                        or right is None
-                    ):
-                        return None
-
-                    try:
-
-                        if isinstance(
-                            node.op,
-                            ast.Add
-                        ):
-                            result = left + right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Sub
-                        ):
-                            result = left - right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Mult
-                        ):
-                            result = left * right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Div
-                        ):
-
-                            if right == 0:
-                                return None
-
-                            result = left / right
-
-                        elif isinstance(
-                            node.op,
-                            ast.FloorDiv
-                        ):
-
-                            if right == 0:
-                                return None
-
-                            result = left // right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Mod
-                        ):
-
-                            if right == 0:
-                                return None
-
-                            result = left % right
-
-                        elif isinstance(
-                            node.op,
-                            ast.Pow
-                        ):
-
-                            if abs(right) > 100:
-                                return None
-
-                            result = left ** right
-
-                        else:
-
-                            return None
-
-                    except Exception:
-
-                        return None
-
-                    if (
-                        abs(result)
-                        > 10**100
-                    ):
-                        return None
-
-                    if (
-                        isinstance(
-                            result,
-                            float
-                        )
-                        and not math.isfinite(
-                            result
-                        )
-                    ):
-                        return None
-
-                    return result
-
-                return None
-
-            result = evaluate(
-                tree
-            )
-
-            if isinstance(
-                result,
-                float
-            ):
-
-                return round(
-                    result,
-                    10
-                )
-
-            return result
-
-        except Exception:
-
-            return None
-
-
-# ============================================================
-# WEB SEARCH INTELLIGENCE
-# ============================================================
-
-WEB_TERMS = (
-    "latest",
-    "today",
-    "current",
-    "recent",
-    "news",
-    "score",
-    "scores",
-    "fixture",
-    "fixtures",
-    "standings",
-    "table",
-    "weather",
-    "price",
-    "prices",
-    "release",
-    "released",
-    "update",
-    "updates",
-    "who won",
-    "when is",
-    "where is",
-    "premier league",
-    "champions league",
-    "football",
-    "match",
-    "matches",
-)
-
-
-def needs_web_search(
-    text: str
-) -> bool:
-
-    lower = text.lower()
-
-    explicit = lower.startswith(
-        (
-            "search the web",
-            "web search",
-            "search for",
-            "look up",
-            "google ",
-        )
-    )
-
-    current = any(
-        term in lower
-        for term in WEB_TERMS
-    )
-
-    question = lower.startswith(
-        (
-            "who ",
-            "what ",
-            "when ",
-            "where ",
-            "which ",
-            "how many ",
-        )
-    )
-
-    return (
-        explicit
-        or (
-            current
-            and question
-        )
-        or "latest" in lower
-        or (
-            "today" in lower
-            and len(lower.split()) > 2
-        )
-    )
-
-
-def extract_search_query(
-    text: str
-) -> str:
-
-    query = re.sub(
-        r"^(search the web|web search|search for|look up|google)\s*",
-        "",
-        text,
-        flags=re.IGNORECASE
-    ).strip()
-
-    return query or text.strip()
-
-
-def smart_web_search(
-    query: str
-) -> str:
-
-    if not WEB_SEARCH_AVAILABLE:
-
-        return (
-            "Web search is currently unavailable "
-            "because web_search.py could not be loaded."
-        )
-
-    results = search(
-        query,
-        limit=MAX_WEB_RESULTS
-    )
-
-    if not results:
-
-        return (
-            "I couldn't find useful web results "
-            "for that search."
-        )
-
-    return format_results(
-        results
-    )
-
-
-# ============================================================
-# NEXORA BRAIN
-# ============================================================
-
-class NexoraBrain:
-
-    @staticmethod
-    def answer(
-        message: str
-    ) -> str:
-
-        text = message.strip()
-        lower = text.lower()
-
-        # ----------------------------------------------------
-        # CURRENT INFORMATION
-        # ----------------------------------------------------
-
-        if needs_web_search(text):
-
-            return smart_web_search(
-                extract_search_query(
-                    text
-                )
-            )
-
-        # ----------------------------------------------------
-        # BASIC CONVERSATION
-        # ----------------------------------------------------
-
-        if (
-            lower in {
-                "hi",
-                "hello",
-                "hey",
-                "hiya",
-            }
-            or re.match(
-                r"^(hi|hello|hey|hiya)\b",
-                lower
-            )
-        ):
-
-            name = settings.get(
-                "user_name"
-            )
-
-            if name:
-
-                return (
-                    f"Hey {name}! "
-                    "I'm Nexora. "
-                    "What are we working on?"
-                )
-
-            return (
-                "Hey! I'm Nexora. "
-                "What are we working on?"
-            )
-
-        if lower in {
-            "bye",
-            "goodbye",
-            "see you",
-            "see ya",
-        }:
-
-            return "See you later! 👋"
-
-        # ----------------------------------------------------
-        # IDENTITY
-        # ----------------------------------------------------
-
-        if "who are you" in lower:
-
-            return (
-                f"I'm Nexora v{VERSION}, "
-                "a local-first assistant with "
-                "memory, knowledge retrieval, "
-                "reasoning tools, safety controls, "
-                "and live web search."
-            )
-
-        if (
-            "what can you do" in lower
-            or "capabilities" in lower
-        ):
-
-            return (
-                "I can:\n\n"
-                "• search the live web\n"
-                "• retrieve stored knowledge\n"
-                "• remember information you ask me to remember\n"
-                "• use conversation context\n"
-                "• perform calculations\n"
-                "• compare stored information\n"
-                "• explain stored knowledge\n"
-                "• detect when current information is needed\n"
-                "• apply safety and secret filtering"
-            )
-
-        if "what version" in lower:
-
-            return (
-                f"I'm running Nexora v{VERSION}."
-            )
-
-        if "slogan" in lower:
-
-            return (
-                f"My slogan is: {SLOGAN}"
-            )
-
-        # ----------------------------------------------------
-        # TIME / DATE
-        # ----------------------------------------------------
-
-        if (
-            "what time is it" in lower
-            or "current time" in lower
-        ):
-
-            return datetime.now().strftime(
-                "It's %H:%M:%S right now."
-            )
-
-        if (
-            "what date is it" in lower
-            or "today's date" in lower
-            or "what day is it" in lower
-        ):
-
-            return datetime.now().strftime(
-                "Today is %A, %d %B %Y."
-            )
-
-        # ----------------------------------------------------
-        # MEMORY
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "remember "
-        ):
-
-            value = re.sub(
-                r"^remember\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            value = re.sub(
-                r"^that\s+",
-                "",
-                value,
-                flags=re.IGNORECASE
-            ).strip()
-
-            if add_memory(value):
-
-                return (
-                    "Got it. "
-                    "I've saved that to memory."
-                )
-
-            return (
-                "I couldn't safely save that."
-            )
-
-        if lower in {
-            "what do you remember",
-            "show my memories",
-            "what have i told you",
-        }:
-
-            items = [
-                item["text"]
-                for item in memories
-            ]
-
-            if not items:
-
-                return (
-                    "I don't have any saved "
-                    "memories yet."
-                )
-
-            return (
-                "Here's what I remember:\n\n"
-                + "\n".join(
-                    f"{i}. {item}"
-                    for i, item
-                    in enumerate(
-                        items,
-                        1
-                    )
-                )
-            )
-
-        if lower.startswith(
-            "forget "
-        ):
-
-            target = re.sub(
-                r"^forget\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip().lower()
-
-            with LOCK:
-
-                before = len(
-                    memories
-                )
-
-                memories[:] = [
-                    item
-                    for item in memories
-                    if item["text"].lower()
-                    != target
-                ]
-
-            save_data()
-
-            if len(memories) < before:
-
-                return (
-                    "Done. "
-                    "I've forgotten that memory."
-                )
-
-            return (
-                "I couldn't find that exact memory."
-            )
-
-        # ----------------------------------------------------
-        # KNOWLEDGE
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "teach nexora "
-        ):
-
-            content = re.sub(
-                r"^teach nexora\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            if "=" not in content:
-
-                return (
-                    "Use:\n"
-                    "teach Nexora topic = information"
-                )
-
-            key, value = [
-                part.strip()
-                for part
-                in content.split(
-                    "=",
-                    1
-                )
-            ]
 
             if (
-                not key
-                or not value
-                or len(key) > 200
-                or len(value) > 4000
-                or contains_secret(value)
+                len(message) >
+                MAX_MESSAGE_LENGTH
             ):
 
-                return (
-                    "I couldn't safely add "
-                    "that knowledge."
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                            "Message is too long."
+                    },
                 )
 
-            with LOCK:
+                return
 
-                knowledge[
-                    key.lower()
-                ] = {
-                    "value": value,
-                    "created": time.time(),
+
+            # -----------------------------------------------
+            # Process
+            # -----------------------------------------------
+
+            add_history(
+                "user",
+                message,
+            )
+
+
+            try:
+
+                result =
+                    assistant_response(
+                        message
+                    )
+
+            except Exception as exc:
+
+                logger.exception(
+                    "Assistant error"
+                )
+
+                result = {
+                    "type": "error",
+                    "message":
+                        "Nexora encountered "
+                        "an internal error.",
                 }
 
-            save_data()
 
-            return (
-                "I've added that to "
-                "my knowledge base."
+            add_history(
+                "assistant",
+                result.get(
+                    "message",
+                    "",
+                ),
+                result.get(
+                    "type",
+                    "chat",
+                ),
             )
 
-        if lower.startswith(
-            "search knowledge "
-        ):
 
-            query = re.sub(
-                r"^search knowledge\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            found = knowledge_search(
-                query
-            )
-
-            if not found:
-
-                return (
-                    "I couldn't find matching "
-                    "knowledge."
-                )
-
-            return "\n".join(
-                f"• {key}: {value}"
-                for _, key, value
-                in found
-            )
-
-        # ----------------------------------------------------
-        # CALCULATOR
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            (
-                "calculate ",
-                "calc ",
-            )
-        ):
-
-            expression = re.sub(
-                r"^(calculate|calc)\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            result = Calculator.calculate(
-                expression
-            )
-
-            if result is None:
-
-                return (
-                    "I couldn't safely "
-                    "calculate that."
-                )
-
-            return (
-                f"The answer is {result}."
-            )
-
-        # ----------------------------------------------------
-        # NAME
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "my name is "
-        ):
-
-            name = re.sub(
-                r"^my name is\s+",
-                "",
-                text,
-                flags=re.IGNORECASE
-            ).strip()
-
-            if (
-                not name
-                or len(name) > 100
-                or contains_secret(name)
-            ):
-
-                return (
-                    "I couldn't safely "
-                    "save that name."
-                )
-
-            settings[
-                "user_name"
-            ] = name
-
-            save_data()
-
-            return (
-                f"Nice to meet you, {name}."
-            )
-
-        if lower in {
-            "what is my name",
-            "what's my name",
-        }:
-
-            name = settings.get(
-                "user_name"
-            )
-
-            if name:
-
-                return (
-                    f"Your saved name is {name}."
-                )
-
-            return (
-                "I don't have your name "
-                "saved yet."
-            )
-
-        # ----------------------------------------------------
-        # MODE
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "set mode "
-        ):
-
-            mode = lower[
-                len("set mode "):
-            ].strip()
-
-            allowed = {
-                "friendly",
-                "professional",
-                "concise",
-                "teacher",
-                "technical",
-                "creative",
-                "formal",
-                "energetic",
-            }
-
-            if mode not in allowed:
-
-                return (
-                    "Available modes: "
-                    + ", ".join(
-                        sorted(allowed)
-                    )
-                )
-
-            settings[
-                "mode"
-            ] = mode
-
-            save_data()
-
-            return (
-                f"Speaking mode changed "
-                f"to {mode}."
-            )
-
-        # ----------------------------------------------------
-        # CLEAR CONTEXT
-        # ----------------------------------------------------
-
-        if lower.startswith(
-            "clear conversation"
-        ):
-
-            conversation.clear()
-
-            return (
-                "I've cleared the "
-                "conversation context."
-            )
-
-        # ----------------------------------------------------
-        # LOCAL KNOWLEDGE RETRIEVAL
-        # ----------------------------------------------------
-
-        found = knowledge_search(
-            text,
-            limit=3
-        )
-
-        if (
-            found
-            and found[0][0] >= 2
-        ):
-
-            return found[0][2]
-
-        # ----------------------------------------------------
-        # MEMORY RETRIEVAL
-        # ----------------------------------------------------
-
-        remembered = memory_search(
-            text,
-            limit=3
-        )
-
-        if remembered and any(
-            phrase in lower
-            for phrase in (
-                "remember",
-                "told",
-                "my ",
-            )
-        ):
-
-            return (
-                "I found this in memory:\n\n"
-                + "\n".join(
-                    "• " + item
-                    for item in remembered
-                )
-            )
-
-        # ----------------------------------------------------
-        # NATURAL MATH
-        # ----------------------------------------------------
-
-        candidate = re.sub(
-            r"[^0-9+\-*/().% ]",
-            "",
-            text
-        ).strip()
-
-        if (
-            candidate
-            and any(
-                operator in candidate
-                for operator in (
-                    "+",
-                    "-",
-                    "*",
-                    "/",
-                    "%",
-                )
-            )
-            and len(candidate) <= 100
-        ):
-
-            result = Calculator.calculate(
-                candidate
-            )
-
-            if result is not None:
-
-                return (
-                    f"The answer is {result}."
-                )
-
-        # ----------------------------------------------------
-        # FALLBACK WEB SEARCH
-        # ----------------------------------------------------
-
-        if (
-            "?" in text
-            and WEB_SEARCH_AVAILABLE
-        ):
-
-            return smart_web_search(
-                text
-            )
-
-        # ----------------------------------------------------
-        # UNKNOWN
-        # ----------------------------------------------------
-
-        return (
-            "I don't have enough reliable "
-            "local information to answer "
-            "that confidently.\n\n"
-            "If it needs current information, "
-            "ask me to search the web, for example:\n\n"
-            "search the web Premier League standings"
-        )
-
-
-# ============================================================
-# PIPELINE
-# ============================================================
-
-def process(
-    message: str,
-    client_id: str = "local"
-) -> str:
-
-    if (
-        not isinstance(
-            message,
-            str
-        )
-        or not message.strip()
-    ):
-
-        return (
-            "Please enter a message."
-        )
-
-    message = message.strip()
-
-    if len(message) > MAX_INPUT:
-
-        return (
-            "That message is too long. "
-            f"Maximum length is {MAX_INPUT} characters."
-        )
-
-    if contains_secret(message):
-
-        return (
-            "For your privacy, don't send "
-            "passwords, API keys, access tokens "
-            "or other secrets in chat."
-        )
-
-    allowed, category = safety_check(
-        message
-    )
-
-    if not allowed:
-
-        return safety_response(
-            category
-        )
-
-    try:
-
-        conversation.append({
-            "role": "user",
-            "content": message,
-            "timestamp": time.time(),
-        })
-
-        reply = NexoraBrain.answer(
-            message
-        )
-
-        if len(reply) > MAX_OUTPUT:
-
-            reply = (
-                reply[
-                    :MAX_OUTPUT
-                ].rstrip()
-                + "…"
-            )
-
-        conversation.append({
-            "role": "assistant",
-            "content": reply,
-            "timestamp": time.time(),
-        })
-
-        return reply
-
-    except Exception:
-
-        return (
-            "Nexora encountered an internal "
-            "problem and stopped safely."
-        )
-
-
-# ============================================================
-# WEB UI
-# ============================================================
-
-HTML = r"""
-<!doctype html>
-
-<html lang="en">
-
-<head>
-
-<meta charset="utf-8">
-
-<meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
->
-
-<title>Nexora</title>
-
-<style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    min-height: 100vh;
-    background: #050008;
-    color: #fff;
-    font-family: Arial, sans-serif;
-}
-
-.wrap {
-    width: min(1050px, 94%);
-    margin: 28px auto;
-}
-
-.head {
-    text-align: center;
-}
-
-.logo {
-    font-size: 64px;
-    font-weight: 900;
-
-    background:
-        linear-gradient(
-            90deg,
-            #fff,
-            #67ffff,
-            #d000ff
-        );
-
-    color: transparent;
-    background-clip: text;
-    -webkit-background-clip: text;
-}
-
-.slogan {
-    color: #67ffff;
-    letter-spacing: 5px;
-    font-size: 11px;
-}
-
-.status {
-    color: #888;
-    margin: 8px;
-}
-
-.chat {
-    height: 68vh;
-    min-height: 430px;
-    overflow: auto;
-
-    padding: 22px;
-
-    border: 1px solid #5d1475;
-    border-radius: 20px;
-
-    background: #09060f;
-}
-
-.msg {
-    max-width: 82%;
-
-    padding: 14px 17px;
-    margin: 0 0 16px;
-
-    border-radius: 16px;
-
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-
-    line-height: 1.55;
-}
-
-.bot {
-    border-left: 3px solid #67ffff;
-    background: #18152a;
-}
-
-.user {
-    margin-left: auto;
-
-    background:
-        linear-gradient(
-            135deg,
-            #6500ff,
-            #c000ff
-        );
-}
-
-.sender {
-    display: block;
-
-    color: #67ffff;
-
-    font-size: 10px;
-    font-weight: bold;
-
-    letter-spacing: 2px;
-
-    margin-bottom: 6px;
-}
-
-.composer {
-    display: flex;
-    gap: 10px;
-    margin-top: 15px;
-}
-
-input {
-    flex: 1;
-
-    padding: 16px;
-
-    border: 1px solid #7500ff;
-    border-radius: 13px;
-
-    background: #110819;
-    color: #fff;
-
-    font-size: 15px;
-
-    outline: none;
-}
-
-button {
-    border: 0;
-    border-radius: 13px;
-
-    padding: 0 25px;
-
-    color: #fff;
-
-    font-weight: bold;
-
-    background:
-        linear-gradient(
-            135deg,
-            #7000ff,
-            #c000ff
-        );
-
-    cursor: pointer;
-}
-
-button:disabled {
-    opacity: .5;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="wrap">
-
-<div class="head">
-
-<div class="logo">
-Nexora
-</div>
-
-<div class="slogan">
-INTELLIGENCE. SECURED.
-</div>
-
-<div class="status">
-v12.0 • Local Reasoning • Memory • Web Search
-</div>
-
-</div>
-
-<div
-    class="chat"
-    id="chat"
->
-
-<div class="msg bot">
-
-<span class="sender">
-NEXORA
-</span>
-
-Hey! I'm Nexora v12. What are we working on?
-
-</div>
-
-</div>
-
-<form
-    class="composer"
-    id="form"
->
-
-<input
-    id="input"
-    maxlength="5000"
-    autocomplete="off"
-    placeholder="Talk to Nexora..."
->
-
-<button
-    id="send"
->
-
-Send
-
-</button>
-
-</form>
-
-</div>
-
-<script>
-
-const form =
-    document.getElementById("form");
-
-const input =
-    document.getElementById("input");
-
-const send =
-    document.getElementById("send");
-
-const chat =
-    document.getElementById("chat");
-
-
-function addMessage(
-    sender,
-    text,
-    type
-) {
-
-    const message =
-        document.createElement("div");
-
-    message.className =
-        "msg " + type;
-
-    const senderElement =
-        document.createElement("span");
-
-    senderElement.className =
-        "sender";
-
-    senderElement.textContent =
-        sender;
-
-    message.appendChild(
-        senderElement
-    );
-
-    message.appendChild(
-        document.createTextNode(text)
-    );
-
-    chat.appendChild(
-        message
-    );
-
-    chat.scrollTop =
-        chat.scrollHeight;
-}
-
-
-form.addEventListener(
-    "submit",
-    async function(event) {
-
-        event.preventDefault();
-
-        const text =
-            input.value.trim();
-
-        if (!text) {
-            return;
-        }
-
-        addMessage(
-            "YOU",
-            text,
-            "user"
-        );
-
-        input.value = "";
-
-        send.disabled = true;
-
-        try {
-
-            const response =
-                await fetch(
-                    "/api/web-chat",
-                    {
-                        method: "POST",
-
-                        headers: {
-                            "Content-Type":
-                                "application/json"
-                        },
-
-                        body: JSON.stringify({
-                            message: text
-                        })
-                    }
-                );
-
-            const data =
-                await response.json();
-
-            addMessage(
-                "NEXORA",
-                data.reply ||
-                data.error ||
-                "No response.",
-                "bot"
-            );
-
-        } catch (error) {
-
-            addMessage(
-                "NEXORA",
-                "I could not connect to the server.",
-                "bot"
-            );
-
-        } finally {
-
-            send.disabled = false;
-
-            input.focus();
-        }
-    }
-);
-
-input.focus();
-
-</script>
-
-</body>
-
-</html>
-"""
-
-
-# ============================================================
-# HTTP SERVER
-# ============================================================
-
-class Server(
-    BaseHTTPRequestHandler
-):
-
-    server_version = (
-        "NexoraHTTP/12.0"
-    )
-
-    def send_json(
-        self,
-        data,
-        status=200
-    ):
-
-        body = json.dumps(
-            data,
-            ensure_ascii=False
-        ).encode("utf-8")
-
-        self.send_response(
-            status
-        )
-
-        self.send_header(
-            "Content-Type",
-            "application/json; charset=utf-8"
-        )
-
-        self.send_header(
-            "Cache-Control",
-            "no-store"
-        )
-
-        self.send_header(
-            "X-Content-Type-Options",
-            "nosniff"
-        )
-
-        self.send_header(
-            "Content-Length",
-            str(len(body))
-        )
-
-        self.end_headers()
-
-        self.wfile.write(
-            body
-        )
-
-    def do_GET(self):
-
-        path = urlparse(
-            self.path
-        ).path
-
-        if path == "/":
-
-            body = HTML.encode(
-                "utf-8"
-            )
-
-            self.send_response(
-                200
-            )
-
-            self.send_header(
-                "Content-Type",
-                "text/html; charset=utf-8"
-            )
-
-            self.send_header(
-                "Content-Length",
-                str(len(body))
-            )
-
-            self.end_headers()
-
-            self.wfile.write(
-                body
+            self.send_json(
+                200,
+                result,
             )
 
             return
 
-        if path == "/health":
 
-            self.send_json({
-                "status": "ok",
-                "name": APP_NAME,
-                "version": VERSION,
-                "web_search":
-                    WEB_SEARCH_AVAILABLE,
-                "web_search_error":
-                    WEB_SEARCH_ERROR,
-            })
+        # ----------------------------------------------------
+        # Clear history
+        # ----------------------------------------------------
+
+        if path == "/api/history/clear":
+
+            clear_history()
+
+            self.send_json(
+                200,
+                {
+                    "success": True,
+                },
+            )
 
             return
+
+
+        # ----------------------------------------------------
+        # 404
+        # ----------------------------------------------------
 
         self.send_json(
-            {"error": "Not found"},
-            404
+            404,
+            {
+                "error":
+                    "Route not found.",
+            },
         )
 
-    def do_POST(self):
-
-        path = urlparse(
-            self.path
-        ).path
-
-        if path not in (
-            "/api/web-chat",
-            "/api/chat",
-        ):
-
-            self.send_json(
-                {"error": "Not found"},
-                404
-            )
-
-            return
-
-        if (
-            path == "/api/chat"
-            and API_KEY
-        ):
-
-            provided = self.headers.get(
-                "X-API-Key",
-                ""
-            )
-
-            if provided != API_KEY:
-
-                self.send_json(
-                    {
-                        "error":
-                        "Authentication required."
-                    },
-                    401
-                )
-
-                return
-
-        try:
-
-            content_length = int(
-                self.headers.get(
-                    "Content-Length",
-                    "0"
-                )
-            )
-
-            if (
-                content_length <= 0
-                or content_length > 100000
-            ):
-
-                self.send_json(
-                    {
-                        "error":
-                        "Request too large."
-                    },
-                    413
-                )
-
-                return
-
-            data = json.loads(
-                self.rfile.read(
-                    content_length
-                ).decode("utf-8")
-            )
-
-            if not isinstance(
-                data,
-                dict
-            ):
-
-                self.send_json(
-                    {
-                        "error":
-                        "JSON object required."
-                    },
-                    400
-                )
-
-                return
-
-            message = data.get(
-                "message"
-            )
-
-            if not isinstance(
-                message,
-                str
-            ):
-
-                self.send_json(
-                    {
-                        "error":
-                        "The 'message' field "
-                        "must be text."
-                    },
-                    400
-                )
-
-                return
-
-            reply = process(
-                message,
-                self.client_address[0]
-            )
-
-            self.send_json({
-                "reply": reply
-            })
-
-        except Exception:
-
-            self.send_json(
-                {
-                    "error":
-                    "Invalid request."
-                },
-                400
-            )
+    # --------------------------------------------------------
+    # Logging
+    # --------------------------------------------------------
 
     def log_message(
         self,
-        format_string,
-        *args
-    ):
+        format_string: str,
+        *args,
+    ) -> None:
 
-        return
+        logger.info(
+            "%s - %s",
+            self.address_string(),
+            format_string % args,
+        )
+
+
+# ============================================================
+# SERVER
+# ============================================================
+
+server: ThreadingHTTPServer | None = None
+
+
+def shutdown_server(
+    signum=None,
+    frame=None,
+) -> None:
+
+    global server
+
+    logger.info(
+        "Shutdown signal received."
+    )
+
+    if server is not None:
+
+        threading.Thread(
+            target=server.shutdown,
+            daemon=True,
+        ).start()
 
 
 # ============================================================
 # STARTUP
 # ============================================================
 
-def main():
+def startup() -> None:
 
-    load_data()
+    global server
 
-    print("=" * 60)
 
-    print(
-        f"{APP_NAME} {VERSION} - {SLOGAN}"
+    logger.info(
+        "Starting %s %s",
+        SERVER_NAME,
+        SERVER_VERSION,
     )
 
-    print(
-        f"Port: {PORT}"
-    )
-
-    print(
-        "Web search:",
-        "ENABLED"
-        if WEB_SEARCH_AVAILABLE
-        else "DISABLED"
-    )
-
-    if not WEB_SEARCH_AVAILABLE:
-
-        print(
-            "Web search error:",
-            WEB_SEARCH_ERROR
-        )
-
-    print("=" * 60)
-
-    server = ThreadingHTTPServer(
-        (HOST, PORT),
-        Server
-    )
 
     try:
 
-        server.serve_forever()
+        server =
+            ThreadingHTTPServer(
+                (HOST, PORT),
+                NexoraHandler,
+            )
+
+    except OSError as exc:
+
+        logger.error(
+            "Could not bind to %s:%s",
+            HOST,
+            PORT,
+        )
+
+        raise exc
+
+
+    server.daemon_threads = True
+
+
+    logger.info(
+        "Nexora listening on %s:%s",
+        HOST,
+        PORT,
+    )
+
+
+    try:
+
+        server.serve_forever(
+            poll_interval=0.5
+        )
 
     except KeyboardInterrupt:
 
-        print(
-            "Nexora shutting down."
+        logger.info(
+            "Keyboard interrupt received."
         )
 
     finally:
 
+        logger.info(
+            "Closing Nexora server."
+        )
+
         server.server_close()
 
+        server = None
+
+
+# ============================================================
+# SIGNAL HANDLERS
+# ============================================================
+
+try:
+
+    signal.signal(
+        signal.SIGTERM,
+        shutdown_server,
+    )
+
+    signal.signal(
+        signal.SIGINT,
+        shutdown_server,
+    )
+
+except Exception:
+
+    # Some environments do not allow
+    # signal handlers to be installed.
+    pass
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
     startup()
